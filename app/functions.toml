@@ -1,0 +1,15 @@
+[functions]
+"0x823B1160" = {} # Direct branch from 0x823B11DC
+"0x823B11E0" = {} # Direct branch from 0x823B1254
+"0x823B1258" = {} # Direct branch from 0x823B12D4
+"0x829A6F04" = {} # Direct branch from 0x829A6F14
+"0x829B3CF8" = {} # Direct branch from 0x829C13BC
+"0x829B3DA8" = {} # Direct branch from 0x829AEEC8
+"0x829B3DB8" = {} # Direct branch from 0x829AEEC0
+"0x829B3DC8" = {} # Direct branch from 0x829AEEB8
+"0x829B3DD8" = {} # Direct branch from 0x829AEEB0
+"0x829BF918" = {} # Direct branch from 0x829C06FC
+"0x829C3FAC" = {} # Direct branch from 0x829C3FBC
+"0x829C40C4" = {} # Direct branch from 0x829C40D4
+"0x82A9EE48" = {} # Direct branch from 0x82AA067C
+"0x823B10E0" = {} # Direct branch from 0x823B115C

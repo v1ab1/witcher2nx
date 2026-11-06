@@ -1,0 +1,184 @@
+--- a/witcher2_pch.h
++++ b/witcher2_pch.h
+@@ -72,0 +73,10 @@
++#elif defined(__GNUC__) && !defined(__clang__)
++// GCC rejects attributes ahead of extern "C" ("attributes are not permitted in
++// this position") and drops them silently: the weak alias is never emitted and
++// the link fails much later with thousands of undefined sub_ symbols. After
++// the declarator it emits both, __imp__ as the entry and the bare name as its
++// weak alias (checked in the symbol table of a devkitA64 build).
++#define DEFINE_REX_FUNC(name)                                       \
++  extern "C" REX_FUNC(name)                                         \
++      __attribute__((alias("__imp__" #name), weak, noinline));      \
++  REX_EXTERN(__imp__##name)
+--- a/witcher2_recomp.40.cpp
++++ b/witcher2_recomp.40.cpp
+@@ -1,0 +2,2 @@
++
++void Witcher2GraphicsCheckpoint(PPCContext& ctx, uint8_t* base);
+@@ -21023 +21025 @@
+-	__imp__VdInitializeRingBuffer(ctx, base);
++	Witcher2GraphicsCheckpoint(ctx, base);
+--- a/witcher2_recomp.67.cpp
++++ b/witcher2_recomp.67.cpp
+@@ -1,0 +2,2 @@
++
++bool Witcher2ShouldDrainLoadingQueue(PPCContext& ctx, uint8_t* base);
+@@ -26785,0 +26788 @@
++	if (ctx.r24.u8 && Witcher2ShouldDrainLoadingQueue(ctx, base)) goto loc_82EEB5A8;
+--- a/witcher2_recomp.100.cpp
++++ b/witcher2_recomp.100.cpp
+@@ -13711,2 +13711,6 @@
+-	// ERROR: conditional branch to unknown address 0x82956D34
+-	if (ctx.cr6.eq) REX_FATAL("Unresolved branch from 0x82956D68 to 0x82956D34");
++	if (ctx.cr6.eq) {
++		ctx.r11.u64 = 1;
++		ctx.r3.u64 = 0;
++		REX_STORE_U8(ctx.r4.u32, ctx.r11.u8);
++		return;
++	}
+@@ -13727,2 +13731,6 @@
+-	// ERROR: conditional branch to unknown address 0x82956D34
+-	if (ctx.cr6.eq) REX_FATAL("Unresolved branch from 0x82956D84 to 0x82956D34");
++	if (ctx.cr6.eq) {
++		ctx.r11.u64 = 1;
++		ctx.r3.u64 = 0;
++		REX_STORE_U8(ctx.r4.u32, ctx.r11.u8);
++		return;
++	}
+@@ -13743,2 +13751,6 @@
+-	// ERROR: conditional branch to unknown address 0x82956D34
+-	if (ctx.cr6.eq) REX_FATAL("Unresolved branch from 0x82956DA0 to 0x82956D34");
++	if (ctx.cr6.eq) {
++		ctx.r11.u64 = 1;
++		ctx.r3.u64 = 0;
++		REX_STORE_U8(ctx.r4.u32, ctx.r11.u8);
++		return;
++	}
+@@ -13759,2 +13771,6 @@
+-	// ERROR: conditional branch to unknown address 0x82956D34
+-	if (ctx.cr6.eq) REX_FATAL("Unresolved branch from 0x82956DBC to 0x82956D34");
++	if (ctx.cr6.eq) {
++		ctx.r11.u64 = 1;
++		ctx.r3.u64 = 0;
++		REX_STORE_U8(ctx.r4.u32, ctx.r11.u8);
++		return;
++	}
+--- a/witcher2_recomp.145.cpp
++++ b/witcher2_recomp.145.cpp
+@@ -12526,3 +12526 @@
+-	// ldbrx r10,0,r11
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0218, "ldbrx");
++	ctx.r10.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r11.u32));
+@@ -12549,3 +12547 @@
+-	// ldbrx r9,0,r5
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0244, "ldbrx");
++	ctx.r9.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r5.u32));
+@@ -12706,3 +12702 @@
+-	// ldbrx r4,0,r8
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D035C, "ldbrx");
++	ctx.r4.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r8.u32));
+@@ -12711,3 +12705 @@
+-	// ldbrx r11,0,r7
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0364, "ldbrx");
++	ctx.r11.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r7.u32));
+@@ -12716,3 +12708 @@
+-	// ldbrx r10,0,r6
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D036C, "ldbrx");
++	ctx.r10.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r6.u32));
+@@ -12721,3 +12711 @@
+-	// ldbrx r9,0,r5
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0374, "ldbrx");
++	ctx.r9.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r5.u32));
+--- a/witcher2_recomp.199.cpp
++++ b/witcher2_recomp.199.cpp
+@@ -13350,3 +13350 @@
+-	// ldbrx r10,0,r11
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D05A4, "ldbrx");
++	ctx.r10.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r11.u32));
+@@ -13373,3 +13371 @@
+-	// ldbrx r9,0,r5
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D05D0, "ldbrx");
++	ctx.r9.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r5.u32));
+@@ -13539,3 +13535 @@
+-	// ldbrx r3,0,r7
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D06F8, "ldbrx");
++	ctx.r3.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r7.u32));
+@@ -13544,3 +13538 @@
+-	// ldbrx r10,0,r6
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0700, "ldbrx");
++	ctx.r10.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r6.u32));
+@@ -13549,3 +13541 @@
+-	// ldbrx r9,0,r5
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0708, "ldbrx");
++	ctx.r9.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r5.u32));
+@@ -13554,3 +13544 @@
+-	// ldbrx r8,0,r4
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D0710, "ldbrx");
++	ctx.r8.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r4.u32));
+--- a/witcher2_recomp.204.cpp
++++ b/witcher2_recomp.204.cpp
+@@ -12482,3 +12482 @@
+-	// ldbrx r11,0,r6
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D1524, "ldbrx");
++	ctx.r11.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r6.u32));
+@@ -12502,3 +12500 @@
+-	// ldbrx r8,0,r10
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D1548, "ldbrx");
++	ctx.r8.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r10.u32));
+@@ -12522,3 +12518 @@
+-	// ldbrx r11,0,r7
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D156C, "ldbrx");
++	ctx.r11.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r7.u32));
+@@ -12542,3 +12536 @@
+-	// ldbrx r8,0,r10
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D1590, "ldbrx");
++	ctx.r8.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r10.u32));
+@@ -12595,3 +12587 @@
+-	// ldbrx r7,0,r11
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D15EC, "ldbrx");
++	ctx.r7.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r11.u32));
+@@ -12621,3 +12611 @@
+-	// ldbrx r4,0,r9
+-	// UNIMPLEMENTED: ldbrx
+-	REX_UNIMPLEMENTED(0x828D161C, "ldbrx");
++	ctx.r4.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r9.u32));
+--- a/witcher2_recomp.228.cpp
++++ b/witcher2_recomp.228.cpp
+@@ -1,0 +2,3 @@
++
++#include <chrono>
++#include <rex/thread.h>
+@@ -27544,0 +27548,11 @@
++	// The worker can start before its derived vtable replaces the base vtable.
++	// Retry the dispatch briefly if the slot still points to the CRT purecall handler.
++	constexpr uint32_t kPureCall = 0x82868CC0;
++	if (ctx.r10.u32 == kPureCall) {
++		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
++		do {
++			rex::thread::Sleep(std::chrono::milliseconds(1));
++			ctx.r11.u64 = REX_LOAD_U32(ctx.r3.u32);
++			ctx.r10.u64 = REX_LOAD_U32(ctx.r11.u32 + 4);
++		} while (ctx.r10.u32 == kPureCall && std::chrono::steady_clock::now() < deadline);
++	}
+--- a/witcher2_recomp.254.cpp
++++ b/witcher2_recomp.254.cpp
+@@ -13416,0 +13417 @@
++	REXLOG_ERROR("Audio initialization failed with guest result 0x{:08X} after PC 0x{:08X}", ctx.r30.u32, static_cast<uint32_t>(ctx.lr));

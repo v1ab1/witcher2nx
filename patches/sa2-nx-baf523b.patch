@@ -1,0 +1,621 @@
+diff --git a/sdk/cmake/rexglue_switch.cmake b/sdk/cmake/rexglue_switch.cmake
+index 4ab8a0c..c54528c 100644
+--- a/sdk/cmake/rexglue_switch.cmake
++++ b/sdk/cmake/rexglue_switch.cmake
+@@ -13,7 +13,8 @@ include_guard(GLOBAL)
+ 
+ set(REXGLUE_SWITCH_NVK_SDK "" CACHE PATH
+     "portlibs/switch directory of the Mesa Horizon SDK (static NVK driver)")
+-if(NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
++option(REXGLUE_SWITCH_NO_NVK "Switch: do not link Mesa's NVK driver (a renderer without Vulkan; no Vulkan presenter)" OFF)
++if(NOT REXGLUE_SWITCH_NO_NVK AND NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
+     message(FATAL_ERROR
+         "REXGLUE_SWITCH_NVK_SDK must point at <mesa-...-horizon-sdk>/opt/devkitpro/portlibs/switch "
+         "(no lib/libvulkan.a under '${REXGLUE_SWITCH_NVK_SDK}')")
+@@ -24,7 +25,7 @@ endif()
+ # the ICD pair plume's Vulkan back end starts from); src/ui/switch_no_vulkan.c answers them with "no driver", so a
+ # Vulkan instance cannot be created and libvulkan.a is not linked. The SDK's headers path stays (plume and the SDK's
+ # Vulkan sources still compile against it).
+-option(REXGLUE_SWITCH_NO_NVK "Switch: do not link Mesa's NVK driver (a renderer without Vulkan; no Vulkan presenter)" OFF)
++
+ 
+ # Static NVK. Not find_package(Vulkan): the Mesa SDK's config requires libelf,
+ # which devkitPro does not package. switch_elf_stubs.c satisfies the linker
+diff --git a/sdk/include/rex/graphics/vulkan/command_processor.h b/sdk/include/rex/graphics/vulkan/command_processor.h
+index 696ff48..7af18ed 100644
+--- a/sdk/include/rex/graphics/vulkan/command_processor.h
++++ b/sdk/include/rex/graphics/vulkan/command_processor.h
+@@ -538,6 +538,10 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
++  uint64_t last_witcher2_movie_upload_frame_ = 0;
++  enum class Witcher2PresentContent : uint8_t { kEmpty, kClearPass, kComposited };
++  Witcher2PresentContent witcher2_present_content_ = Witcher2PresentContent::kEmpty;
++  bool witcher2_previous_present_composited_ = false;
+   uint64_t frame_completed_ = 0;
+   // Submission indices of frames that have already been submitted.
+   uint64_t closed_frame_submissions_[kMaxFramesInFlight] = {};
+diff --git a/sdk/include/rex/graphics/vulkan/render_target_cache.h b/sdk/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..d5ea71c 100644
+--- a/sdk/include/rex/graphics/vulkan/render_target_cache.h
++++ b/sdk/include/rex/graphics/vulkan/render_target_cache.h
+@@ -102,6 +102,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   VkBuffer edram_buffer() const { return edram_buffer_; }
+ 
++  VkImageView RequestWitcher2BackBuffer(uint32_t address);
++
+   // Performs the resolve to a shared memory area according to the current
+   // register values, and also clears the render targets if needed. Must be in a
+   // frame for calling.
+@@ -864,6 +866,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   std::vector<TransferInvocation> current_transfer_invocations_;
+ 
+   // Temporary storage for DumpRenderTargets.
++  RenderTarget* witcher2_back_buffer_ = nullptr;
++  uint64_t witcher2_back_buffer_frame_ = 0;
+   std::vector<ResolveCopyDumpRectangle> dump_rectangles_;
+   std::vector<DumpInvocation> dump_invocations_;
+   std::vector<ResolveCopyDispatch> direct_resolve_dispatches_;
+diff --git a/sdk/include/rex/system/xsocket.h b/sdk/include/rex/system/xsocket.h
+index a1b4443..eba7cb6 100644
+--- a/sdk/include/rex/system/xsocket.h
++++ b/sdk/include/rex/system/xsocket.h
+@@ -105,7 +105,7 @@ class XSocket : public XObject {
+   X_STATUS Connect(N_XSOCKADDR* name, int name_len);
+   X_STATUS Bind(N_XSOCKADDR_IN* name, int name_len);
+   X_STATUS Listen(int backlog);
+-  object_ref<XSocket> Accept(N_XSOCKADDR* name, int* name_len);
++  object_ref<XSocket> Accept(N_XSOCKADDR* name, int* name_len, uint32_t& error);
+   int Shutdown(int how);
+ 
+   int Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags);
+diff --git a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+index 38fc7d1..af4e406 100644
+--- a/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/sdk/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -499,10 +499,10 @@ void SpirvShaderTranslator::StartTranslation() {
+     var_main_vfetch_address_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_int_,
+                                  "xe_var_vfetch_address", const_int_0_);
+-    var_main_tfetch_lod_ =
+     var_main_vfetch_bound_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_int_,
+                                  "xe_var_vfetch_bound", const_int_0_);
++    var_main_tfetch_lod_ =
+         builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_float_,
+                                  "xe_var_tfetch_lod", const_float_0_);
+     var_main_tfetch_gradients_h_ =
+diff --git a/sdk/src/graphics/vulkan/command_processor.cpp b/sdk/src/graphics/vulkan/command_processor.cpp
+index e7b2890..a90a9ed 100644
+--- a/sdk/src/graphics/vulkan/command_processor.cpp
++++ b/sdk/src/graphics/vulkan/command_processor.cpp
+@@ -77,6 +77,14 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(witcher2_vulkan_compatibility, false, "GPU/Vulkan",
++                    "Enable Witcher 2 movie, presentation and terrain rendering fixes")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++REXCVAR_DEFINE_BOOL(witcher2_direct_present, false, "GPU/Vulkan",
++                    "Present the Witcher 2 render target directly for renderer comparisons")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+@@ -2102,6 +2110,9 @@ void VulkanCommandProcessor::ShutdownContext() {
+   std::memset(closed_frame_submissions_, 0, sizeof(closed_frame_submissions_));
+   frame_completed_ = 0;
+   frame_current_ = 1;
++  last_witcher2_movie_upload_frame_ = 0;
++  witcher2_present_content_ = Witcher2PresentContent::kEmpty;
++  witcher2_previous_present_composited_ = false;
+   frame_open_ = false;
+ 
+   for (const auto& semaphore : submissions_in_flight_semaphores_) {
+@@ -2324,6 +2335,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+                                             frame_used_async_placeholder_pipeline_;
+   if (skip_present_due_async_placeholder) {
++    witcher2_present_content_ = Witcher2PresentContent::kEmpty;
++    witcher2_previous_present_composited_ = false;
+     static bool skipped_incomplete_frame_logged = false;
+     if (!skipped_incomplete_frame_logged) {
+       skipped_incomplete_frame_logged = true;
+@@ -2335,6 +2348,22 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     return;
+   }
+ 
++  if (REXCVAR_GET(witcher2_vulkan_compatibility)) {
++    const auto content = std::exchange(witcher2_present_content_, Witcher2PresentContent::kEmpty);
++    const bool main_back_buffer = frontbuffer_ptr == 0x139E3000 && frontbuffer_width == 1280 &&
++                                  frontbuffer_height == 720;
++    const bool hold_previous = main_back_buffer && content == Witcher2PresentContent::kClearPass &&
++                               witcher2_previous_present_composited_;
++    witcher2_previous_present_composited_ =
++        main_back_buffer && content == Witcher2PresentContent::kComposited;
++    if (hold_previous) {
++      // The game presents an auxiliary clear pass between composed frames.
++      // Keep the previous image visible while still completing the guest frame.
++      EndSubmission(true);
++      return;
++    }
++  }
++
+   SwapPostEffect swap_post_effect = GetActualSwapPostEffect();
+ 
+   // Obtain the actual swap source texture size (resolution-scaled if it's a
+@@ -2343,9 +2372,26 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   uint32_t frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
+   xenos::TextureFormat frontbuffer_format;
+   bool swap_source_needs_rb_swap = false;
+-  VkImageView swap_texture_view = texture_cache_->RequestSwapTexture(
+-      frontbuffer_width_scaled, frontbuffer_height_scaled, frontbuffer_format,
+-      &frontbuffer_width_unscaled, &frontbuffer_height_unscaled, &swap_source_needs_rb_swap);
++  VkImageView swap_texture_view = VK_NULL_HANDLE;
++  if (REXCVAR_GET(witcher2_direct_present) && frontbuffer_width == 1280 &&
++      frontbuffer_height == 720) {
++    const auto fetch = register_file_->GetTextureFetch(0);
++    if (fetch.tiled && fetch.format == xenos::TextureFormat::k_8_8_8_8 &&
++        fetch.endianness == xenos::Endian::kNone) {
++      swap_texture_view = render_target_cache_->RequestWitcher2BackBuffer(
++          (fetch.base_address & 0x1ffff) << 12);
++      if (swap_texture_view != VK_NULL_HANDLE) {
++        frontbuffer_width_scaled = frontbuffer_width_unscaled = frontbuffer_width;
++        frontbuffer_height_scaled = frontbuffer_height_unscaled = frontbuffer_height;
++        frontbuffer_format = fetch.format;
++      }
++    }
++  }
++  if (swap_texture_view == VK_NULL_HANDLE) {
++    swap_texture_view = texture_cache_->RequestSwapTexture(
++        frontbuffer_width_scaled, frontbuffer_height_scaled, frontbuffer_format,
++        &frontbuffer_width_unscaled, &frontbuffer_height_unscaled, &swap_source_needs_rb_swap);
++  }
+   if (swap_texture_view == VK_NULL_HANDLE) {
+     REXGPU_ERROR("XELOG_GPU PRESENT: swap_texture_view=NULL");
+     return;
+@@ -3805,6 +3851,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     // vertex shader types), the bindings will stay the same.
+     // TODO(Triang3l): Sampler caching and reuse for adjacent draws within one
+     // submission.
++    constexpr uint64_t kWitcher2TerrainPixelShader = 0xA282FBD221ED6A59ULL;
++    const bool fix_witcher2_terrain = pixel_shader &&
++                                    pixel_shader->ucode_data_hash() == kWitcher2TerrainPixelShader &&
++                                    REXCVAR_GET(witcher2_vulkan_compatibility);
+     uint32_t samplers_overflowed_count = 0;
+     for (uint32_t j = 0; j < 2; ++j) {
+       std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>& shader_samplers =
+@@ -3820,7 +3870,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+           shader->GetSamplerBindingsAfterTranslation();
+       if (!i) {
+         shader_samplers.reserve(shader_sampler_bindings.size());
+-        for (const VulkanShader::SamplerBinding& shader_sampler_binding : shader_sampler_bindings) {
++        for (auto shader_sampler_binding : shader_sampler_bindings) {
++          // Lower mips of the 3D terrain color atlas produce purple bands on distant terrain.
++          if (j && fix_witcher2_terrain && shader_sampler_binding.fetch_constant == 2) {
++            shader_sampler_binding.mip_filter = xenos::TextureFilter::kBaseMap;
++            shader_sampler_binding.aniso_filter = xenos::AnisoFilter::kDisabled;
++          }
+           shader_samplers.emplace_back(texture_cache_->GetSamplerParameters(shader_sampler_binding),
+                                        VK_NULL_HANDLE);
+         }
+@@ -3878,6 +3933,22 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
++  if (REXCVAR_GET(witcher2_vulkan_compatibility) && pixel_shader &&
++      pixel_shader->ucode_data_hash() == 0x9C1603B0BD629B0Aull &&
++      last_witcher2_movie_upload_frame_ != frame_current_) {
++    last_witcher2_movie_upload_frame_ = frame_current_;
++    const auto luma = regs.GetTextureFetch(0);
++    const auto chroma_u = regs.GetTextureFetch(1);
++    const auto chroma_v = regs.GetTextureFetch(2);
++    const uint32_t start = (chroma_v.base_address & 0x1ffff) << 12;
++    // The movie decoder writes the three contiguous planes in guest RAM.
++    if (!luma.tiled && !chroma_u.tiled && !chroma_v.tiled &&
++        luma.pitch == 64 && chroma_u.pitch == 32 && chroma_v.pitch == 32 &&
++        ((chroma_u.base_address & 0x1ffff) << 12) == start + 512 * 1024 &&
++        ((luma.base_address & 0x1ffff) << 12) == start + 1024 * 1024) {
++      shared_memory_->MemoryInvalidationCallback(start, 3 * 1024 * 1024, true);
++    }
++  }
+   texture_cache_->RequestTextures(used_texture_mask);
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+@@ -4159,6 +4230,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       render_target_cache_->last_update_framebuffer());
+ 
+   // Draw.
++  if (normalized_color_mask && witcher2_present_content_ != Witcher2PresentContent::kComposited &&
++      REXCVAR_GET(witcher2_vulkan_compatibility)) {
++    switch (pixel_shader->ucode_data_hash()) {
++      case 0xF889DD4516CFCDB8ULL:
++        witcher2_present_content_ = Witcher2PresentContent::kClearPass;
++        break;
++      case 0x349A1E0A6A0CD02FULL:
++      case 0xE5529982266D5A38ULL:
++        // Fullscreen passes also used to finish the clear frame.
++        break;
++      default:
++        witcher2_present_content_ = Witcher2PresentContent::kComposited;
++        break;
++    }
++  }
+ #if REX_PLATFORM_SWITCH
+   RexSwitchPerfCount(5);
+   RexSwitchPerfAdd(6, uint64_t(dynamic_scissor_.extent.width) * dynamic_scissor_.extent.height);
+diff --git a/sdk/src/graphics/vulkan/render_target_cache.cpp b/sdk/src/graphics/vulkan/render_target_cache.cpp
+index 3f41047..7be8244 100644
+--- a/sdk/src/graphics/vulkan/render_target_cache.cpp
++++ b/sdk/src/graphics/vulkan/render_target_cache.cpp
+@@ -70,6 +70,8 @@ extern "C" void RexSwitchPerfAdd(unsigned id, uint64_t value);
+ extern "C" bool RexSwitchPerfSkip(unsigned bit);
+ #endif
+ 
++REXCVAR_DECLARE(bool, witcher2_direct_present);
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1099,6 +1101,7 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+ }
+ 
+ void VulkanRenderTargetCache::ClearCache() {
++  witcher2_back_buffer_ = nullptr;
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+@@ -1132,6 +1135,24 @@ void VulkanRenderTargetCache::EndSubmission() {
+   }
+ }
+ 
++// Full-screen scanout address used by the supported Witcher 2 executable.
++static constexpr uint32_t kWitcher2BackBufferAddress = 0x139E3000;
++
++VkImageView VulkanRenderTargetCache::RequestWitcher2BackBuffer(uint32_t address) {
++  if (address != kWitcher2BackBufferAddress || !witcher2_back_buffer_ ||
++      witcher2_back_buffer_frame_ != command_processor_.GetCurrentFrame()) {
++    return VK_NULL_HANDLE;
++  }
++  auto& target = *static_cast<VulkanRenderTarget*>(witcher2_back_buffer_);
++  const auto stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++  command_processor_.PushImageMemoryBarrier(
++      target.image(), ui::vulkan::util::InitializeSubresourceRange(),
++      target.current_stage_mask(), stage, target.current_access_mask(), VK_ACCESS_SHADER_READ_BIT,
++      target.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  target.SetUsage(stage, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  return target.view_depth_color();
++}
++
+ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+                                       VulkanSharedMemory& shared_memory,
+                                       VulkanTextureCache& texture_cache,
+@@ -1163,6 +1184,35 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+   const VkDevice device = vulkan_device->device();
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+ 
++  const bool writes_witcher2_back_buffer = REXCVAR_GET(witcher2_direct_present) &&
++      resolve_info.copy_dest_base == kWitcher2BackBufferAddress &&
++      resolve_info.copy_dest_extent_length;
++  if (writes_witcher2_back_buffer) {
++    witcher2_back_buffer_ = nullptr;
++  }
++  if (writes_witcher2_back_buffer && GetPath() == Path::kHostRenderTargets &&
++      !draw_resolution_scaled && resolve_info.copy_dest_extent_start == kWitcher2BackBufferAddress &&
++      resolve_info.coordinate_info.width_div_8 == 160 && resolve_info.height_div_8 == 90 &&
++      !resolve_info.IsCopyingDepth()) {
++    uint32_t base, row_length, rows, pitch;
++    resolve_info.GetCopyEdramTileSpan(base, row_length, rows, pitch);
++    if (base == 0 && row_length == 16 && rows == 45 && pitch == 16) {
++      GetResolveCopyRectanglesToDump(base, row_length, rows, pitch, dump_rectangles_);
++      if (dump_rectangles_.size() == 1) {
++        const auto& rectangle = dump_rectangles_.front();
++        const auto key = rectangle.render_target->key();
++        if (rectangle.row_first == 0 && rectangle.rows == rows &&
++            rectangle.row_first_start == 0 && rectangle.row_last_end == row_length &&
++            key.base_tiles == 0 && key.GetWidth() == 1280 && !key.is_depth &&
++            key.msaa_samples == xenos::MsaaSamples::k1X &&
++            GetColorVulkanFormat(key.GetColorFormat()) == VK_FORMAT_R8G8B8A8_UNORM) {
++          witcher2_back_buffer_ = rectangle.render_target;
++          witcher2_back_buffer_frame_ = command_processor_.GetCurrentFrame();
++        }
++      }
++    }
++  }
++
+   // Copying.
+   bool copied = false;
+   if (resolve_info.copy_dest_extent_length) {
+diff --git a/sdk/src/graphics/vulkan/texture_cache.cpp b/sdk/src/graphics/vulkan/texture_cache.cpp
+index 383f182..6fd3b59 100644
+--- a/sdk/src/graphics/vulkan/texture_cache.cpp
++++ b/sdk/src/graphics/vulkan/texture_cache.cpp
+@@ -46,6 +46,8 @@ extern "C" void RexSwitchPerfAdd(unsigned id, uint64_t value);
+ extern "C" bool RexSwitchPerfSkip(unsigned bit);
+ #endif
+ 
++REXCVAR_DECLARE(bool, witcher2_vulkan_compatibility);
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1301,6 +1303,38 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   uint32_t level_last = load_mips ? texture_key.mip_max_level : 0;
+   assert_true(level_first <= level_last);
+   uint32_t level_packed = guest_layout.packed_level;
++  if (REXCVAR_GET(witcher2_vulkan_compatibility) && load_base && !load_mips &&
++      !texture_key.tiled && !is_3d_tiling && !texture_key.scaled_resolve && level_packed != 0 &&
++      array_size == 1 && guest_layout.base.row_pitch_bytes >= width &&
++      dimension == xenos::DataDimension::k2DOrStacked &&
++      guest_format == xenos::TextureFormat::k_8 && texture_key.endianness == xenos::Endian::kNone &&
++      (host_format.format == VK_FORMAT_R8_UNORM || host_format.format == VK_FORMAT_R8_SNORM)) {
++    auto& shared = static_cast<VulkanSharedMemory&>(shared_memory());
++    shared.Use(VulkanSharedMemory::Usage::kRead);
++    vulkan_texture.MarkAsUsed();
++    const auto old_usage = vulkan_texture.SetUsage(VulkanTexture::Usage::kTransferDestination);
++    if (old_usage != VulkanTexture::Usage::kTransferDestination) {
++      VkPipelineStageFlags source_stage, destination_stage;
++      VkAccessFlags source_access, destination_access;
++      VkImageLayout old_layout, new_layout;
++      GetTextureUsageMasks(old_usage, source_stage, source_access, old_layout);
++      GetTextureUsageMasks(VulkanTexture::Usage::kTransferDestination, destination_stage,
++                           destination_access, new_layout);
++      command_processor_.PushImageMemoryBarrier(
++          vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
++          source_stage, destination_stage, source_access, destination_access, old_layout,
++          new_layout);
++    }
++    command_processor_.SubmitBarriers(true);
++    VkBufferImageCopy copy{};
++    copy.bufferOffset = VkDeviceSize(texture_key.base_page) << 12;
++    copy.bufferRowLength = guest_layout.base.row_pitch_bytes;
++    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    copy.imageExtent = {width, height, 1};
++    command_processor_.deferred_command_buffer().CmdVkCopyBufferToImage(
++        shared.buffer(), vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
++    return true;
++  }
+   uint32_t level_stored_first = std::min(level_first, level_packed);
+   uint32_t level_stored_last = std::min(level_last, level_packed);
+   uint32_t texture_resolution_scale_x = texture_key.scaled_resolve ? draw_resolution_scale_x() : 1;
+diff --git a/sdk/src/kernel/xam/xam_net.cpp b/sdk/src/kernel/xam/xam_net.cpp
+index 58e36a4..b86d82a 100644
+--- a/sdk/src/kernel/xam/xam_net.cpp
++++ b/sdk/src/kernel/xam/xam_net.cpp
+@@ -716,7 +716,7 @@ u32 NetDll_listen_entry(u32 caller, u32 socket_handle, i32 backlog) {
+ 
+ u32 NetDll_accept_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> addr_ptr,
+                         mapped_u32 addrlen_ptr) {
+-  if (!addr_ptr) {
++  if (addr_ptr && (!addrlen_ptr || *addrlen_ptr < sizeof(XSOCKADDR))) {
+     // WSAEFAULT
+     XThread::SetLastError(0x271E);
+     return -1;
+@@ -729,18 +729,24 @@ u32 NetDll_accept_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> addr
+     return -1;
+   }
+ 
+-  N_XSOCKADDR native_addr(addr_ptr);
+-  int native_len = *addrlen_ptr;
+-  auto new_socket = socket->Accept(&native_addr, &native_len);
+-  if (new_socket) {
++  N_XSOCKADDR native_addr;
++  int native_len = sizeof(native_addr);
++  uint32_t error;
++  auto new_socket = socket->Accept(&native_addr, &native_len, error);
++  if (!new_socket) {
++    if (error != 0) {
++      XThread::SetLastError(error);
++    }
++    return -1;
++  }
++
++  if (addr_ptr) {
+     addr_ptr->address_family = native_addr.address_family;
+-    std::memcpy(addr_ptr->sa_data, native_addr.sa_data, *addrlen_ptr - 2);
++    std::memcpy(addr_ptr->sa_data, native_addr.sa_data,
++                native_len - sizeof(native_addr.address_family));
+     *addrlen_ptr = native_len;
+-
+-    return new_socket->handle();
+-  } else {
+-    return -1;
+   }
++  return new_socket->handle();
+ }
+ 
+ struct x_fd_set {
+diff --git a/sdk/src/system/function_dispatcher.cpp b/sdk/src/system/function_dispatcher.cpp
+index bd43109..50c7d63 100644
+--- a/sdk/src/system/function_dispatcher.cpp
++++ b/sdk/src/system/function_dispatcher.cpp
+@@ -23,6 +23,10 @@
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/thread_state.h>
+ 
++#if defined(__SWITCH__)
++extern "C" uint32_t svcOutputDebugString(const char* message, uint64_t size);
++#endif
++
+ namespace rex::runtime {
+ 
+ namespace {
+@@ -35,6 +39,15 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
+ }  // namespace
+ 
+ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
++#if defined(__SWITCH__)
++  char message[96];
++  const auto length = std::snprintf(
++      message, sizeof(message), "Invalid guest call: target=0x%08X LR=0x%08X CTR=0x%08X",
++      ctx.last_indirect_target, uint32_t(ctx.lr), ctx.ctr.u32);
++  if (length > 0 && static_cast<size_t>(length) < sizeof(message)) {
++    svcOutputDebugString(message, length);
++  }
++#endif
+   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
+             ctx.last_indirect_target);
+ }
+diff --git a/sdk/src/system/xsocket.cpp b/sdk/src/system/xsocket.cpp
+index 2d13ac8..bc4f42f 100644
+--- a/sdk/src/system/xsocket.cpp
++++ b/sdk/src/system/xsocket.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cerrno>
+ #include <cstring>
+ 
+ #include <rex/kernel/xam/module.h>
+@@ -28,6 +29,7 @@
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
++#include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #endif
+ 
+@@ -91,6 +93,23 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+ }
+ 
+ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
++  constexpr uint32_t kXboxFionbio = 0x8004667e;
++  if (cmd == kXboxFionbio) {
++    if (!arg_ptr) {
++      return X_STATUS_INVALID_PARAMETER;
++    }
++
++    rex::be<uint32_t> guest_mode;
++    std::memcpy(&guest_mode, arg_ptr, sizeof(guest_mode));
++#if REX_PLATFORM_WIN32
++    unsigned long mode = guest_mode != 0;
++#else
++    int mode = guest_mode != 0;
++#endif
++    int ret = rex::net::socket_ioctl(native_handle_, FIONBIO, reinterpret_cast<uint8_t*>(&mode));
++    return ret == 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
++  }
++
+   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
+   if (ret < 0) {
+     // TODO: Get last error
+@@ -130,11 +149,19 @@ X_STATUS XSocket::Listen(int backlog) {
+   return X_STATUS_SUCCESS;
+ }
+ 
+-object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
++object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len, uint32_t& error) {
++  error = 0;
+   sockaddr n_sockaddr;
+   socklen_t n_name_len = sizeof(sockaddr);
+   uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
+   if (ret == -1) {
++#if REX_PLATFORM_WIN32
++    error = WSAGetLastError();
++#else
++    if (errno == EAGAIN || errno == EWOULDBLOCK) {
++      error = 10035;  // WSAEWOULDBLOCK
++    }
++#endif
+     std::memset(name, 0, *name_len);
+     *name_len = 0;
+     return nullptr;
+diff --git a/sdk/src/ui/switch_code_blocks.cpp b/sdk/src/ui/switch_code_blocks.cpp
+index 96697ba..285f355 100644
+--- a/sdk/src/ui/switch_code_blocks.cpp
++++ b/sdk/src/ui/switch_code_blocks.cpp
+@@ -305,7 +305,8 @@ void Apply(Handle proc) {
+            static_cast<unsigned long long>(text_va), static_cast<unsigned long long>(copy));
+ }
+ 
+-__attribute__((constructor(101))) void RexCodeBlocksInit() {
++// The Witcher 2 boot test uses the loader's original executable mappings.
++[[maybe_unused]] void RexCodeBlocksInit() {
+   const Handle proc = envGetOwnProcessHandle();
+   if (proc == INVALID_HANDLE) {
+     SelfTest(CUR_PROCESS_HANDLE);
+@@ -320,6 +321,6 @@ __attribute__((constructor(101))) void RexCodeBlocksInit() {
+ 
+ }  // namespace
+ 
+-extern "C" const char* RexCodeBlocksStatus(void) { return g_status; }
++extern "C" const char* RexCodeBlocksStatus(void) { return "[code blocks] disabled for boot test"; }
+ 
+ #endif  // __SWITCH__
+diff --git a/sdk/src/ui/vulkan/vulkan_device.cpp b/sdk/src/ui/vulkan/vulkan_device.cpp
+index 237b51f..844e043 100644
+--- a/sdk/src/ui/vulkan/vulkan_device.cpp
++++ b/sdk/src/ui/vulkan/vulkan_device.cpp
+@@ -896,6 +896,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     }
+   }
+ 
++#if REX_PLATFORM_SWITCH
++  // NVK on Tegra X1 marks its unified heap as device-local, but some versions
++  // omit the flag on its memory types.
++  if (!device->memory_types_.device_local) {
++    for (uint32_t index = 0; index < memory_properties.memoryTypeCount; ++index) {
++      const auto heap_index = memory_properties.memoryTypes[index].heapIndex;
++      if (memory_properties.memoryHeaps[heap_index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
++        device->memory_types_.device_local |= uint32_t(1) << index;
++      }
++    }
++  }
++#endif
++
+   return device;
+ }
+ 
+diff --git a/sdk/src/ui/vulkan/vulkan_instance.cpp b/sdk/src/ui/vulkan/vulkan_instance.cpp
+index 9c4f0f3..418534f 100644
+--- a/sdk/src/ui/vulkan/vulkan_instance.cpp
++++ b/sdk/src/ui/vulkan/vulkan_instance.cpp
+@@ -34,8 +34,6 @@ REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan de
+ // declared by hand.
+ extern "C" {
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
+-VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance,
+-                                             const VkAllocationCallbacks* pAllocator);
+ }
+ #endif  // REX_PLATFORM_SWITCH
+ 
+@@ -91,7 +89,6 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   // dlopen in an NRO either. The entry functions are taken directly. Verified on
+   // the console: vkCreateInstance called this way returns VK_SUCCESS on the GM20B.
+   ifn.vkGetInstanceProcAddr = &::vkGetInstanceProcAddr;
+-  ifn.vkDestroyInstance = &::vkDestroyInstance;
+   loader_loaded = true;
+ #else
+   loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+@@ -412,6 +409,15 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+ 
+   // Load instance functions.
+ 
++#if REX_PLATFORM_SWITCH
++  ifn.vkDestroyInstance = PFN_vkDestroyInstance(
++      ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, "vkDestroyInstance"));
++  if (!ifn.vkDestroyInstance) {
++    REXLOG_ERROR("Failed to load vkDestroyInstance from the Switch Vulkan driver");
++    return nullptr;
++  }
++#endif
++
+ #define XE_UI_VULKAN_FUNCTION(name)                                                            \
+   functions_loaded &=                                                                          \
+       (ifn.name = PFN_##name(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, #name))) != \
+@@ -560,7 +566,9 @@ VulkanInstance::~VulkanInstance() {
+       functions_.vkDestroyDebugUtilsMessengerEXT(instance_, debug_utils_messenger_, nullptr);
+     }
+ 
+-    functions_.vkDestroyInstance(instance_, nullptr);
++    if (functions_.vkDestroyInstance) {
++      functions_.vkDestroyInstance(instance_, nullptr);
++    }
+   }
+ 
+   loader_.Close();
