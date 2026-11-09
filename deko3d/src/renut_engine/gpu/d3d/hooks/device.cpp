@@ -867,11 +867,10 @@ void D3DDevice_RunCommandBuffer_hook(u32 device_va, u32 command_buffer,
 // render_thread::kMaxFramesAhead ahead.
 constexpr u32 kSa2DeviceOffsetGammaRamp = 15408;  // sa2-nx: SA2's +0x3A9C (the +404 block)
 
-// sa2-nx (2026-10-20): the SDK's core layout (system/xthread.cpp).
-REXCVAR_DEFINE_BOOL(sa2_renut_core_layout, true, "SA2/Renderer",
-                    "Renut's renderer on the Switch: at the first Swap the guest main thread (SA2's game and drawing "
-                    "thread) is pinned to core 0 and every other guest thread gets cores 1-2 (the render thread is on "
-                    "core 1), so no game thread time-slices with it. Off: every guest thread on any core, as before")
+// Witcher 2's workers compete with the render thread when excluded from core 0.
+REXCVAR_DEFINE_BOOL(sa2_renut_core_layout, false, "Witcher 2/Performance",
+                    "Reserve core 0 for the main game thread and restrict the other guest threads to cores 1-2. "
+                    "Off: let the scheduler distribute guest threads across the process cores.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {

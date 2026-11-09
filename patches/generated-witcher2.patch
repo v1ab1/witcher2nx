@@ -21,11 +21,14 @@
 +	Witcher2GraphicsCheckpoint(ctx, base);
 --- a/witcher2_recomp.67.cpp
 +++ b/witcher2_recomp.67.cpp
-@@ -1,0 +2,2 @@
+@@ -1,0 +2,3 @@
 +
 +bool Witcher2ShouldDrainLoadingQueue(PPCContext& ctx, uint8_t* base);
-@@ -26785,0 +26788 @@
++bool Witcher2ShouldDeferIdleLoadingFrame(PPCContext& ctx, uint8_t* base);
+@@ -26785,0 +26789 @@
 +	if (ctx.r24.u8 && Witcher2ShouldDrainLoadingQueue(ctx, base)) goto loc_82EEB5A8;
+@@ -26909,0 +26914 @@
++	if (Witcher2ShouldDeferIdleLoadingFrame(ctx, base)) goto loc_82EEB5A8;
 --- a/witcher2_recomp.100.cpp
 +++ b/witcher2_recomp.100.cpp
 @@ -13711,2 +13711,6 @@
@@ -96,6 +99,30 @@
 -	// UNIMPLEMENTED: ldbrx
 -	REX_UNIMPLEMENTED(0x828D0374, "ldbrx");
 +	ctx.r9.u64 = __builtin_bswap64(REX_LOAD_U64(ctx.r5.u32));
+--- a/witcher2_recomp.181.cpp
++++ b/witcher2_recomp.181.cpp
+@@ -2,0 +3,4 @@
++#if REX_PLATFORM_SWITCH
++void Witcher2YieldJobWait();
++#endif
++
+@@ -28737,0 +28742,5 @@
++#if REX_PLATFORM_SWITCH
++	// Let the producer run after a bounded spin on its completion counter.
++	constexpr uint32_t kPollsBeforeYield = 512;
++	uint32_t polls = 0;
++#endif
+@@ -28744 +28753,9 @@
+-	if (ctx.cr6.gt) goto loc_82FD3E44;
++	if (ctx.cr6.gt) {
++#if REX_PLATFORM_SWITCH
++		if (++polls == kPollsBeforeYield) {
++			Witcher2YieldJobWait();
++			polls = 0;
++		}
++#endif
++		goto loc_82FD3E44;
++	}
 --- a/witcher2_recomp.199.cpp
 +++ b/witcher2_recomp.199.cpp
 @@ -13350,3 +13350 @@

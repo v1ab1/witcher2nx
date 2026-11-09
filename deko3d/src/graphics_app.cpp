@@ -1,10 +1,17 @@
 #include "boot.h"
 #include "witcher2_init.h"
 
+#include <rex/cvar.h>
 #include <rex/rex_app.h>
 #include <rex/logging.h>
 
 #include "renut_engine/gpu/overlay/app_integration.h"
+
+#if REX_PLATFORM_SWITCH
+REXCVAR_DEFINE_BOOL(switch_profile_stacks, false, "Witcher 2/Diagnostics",
+                    "Sample thread stacks in logs/rex/rex_profile.log.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+#endif
 
 namespace {
 

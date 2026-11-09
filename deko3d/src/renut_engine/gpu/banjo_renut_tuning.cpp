@@ -1510,11 +1510,14 @@ Latched g_latched;
 std::atomic<bool> g_latched_ready{false};
 
 void LatchTuning() {
+  // The live Witcher renderer leaves SA2's enhancement groups off. Its
+  // deko3d depth paths have their own guards and can be enabled individually.
+  const bool optimize_depth = ::renut::gpu::IsDeko3D() || EnhancementActive(EnhancementGroup::kNonCpu, true);
   g_latched.bool_spec = ::renut::gpu::UsesVulkanBindings() && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_bool_spec));
   g_latched.tess_grid = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_tess_grid));
-  g_latched.depth_only = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_only));
+  g_latched.depth_only = optimize_depth && REXCVAR_GET(banjo_gpu_depth_only);
   g_latched.output_trim = ::renut::gpu::UsesVulkanBindings() && EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_output_trim));
-  g_latched.depth_words_view = EnhancementActive(EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_depth_words_view));
+  g_latched.depth_words_view = optimize_depth && REXCVAR_GET(banjo_gpu_depth_words_view);
   g_latched.tess_spec = REXCVAR_GET(banjo_deko3d_tess_spec);
   g_latched.alpha_spec = REXCVAR_GET(banjo_deko3d_alpha_spec);
   g_latched.draw_resolves = REXCVAR_GET(banjo_deko3d_draw_resolves);
@@ -1540,7 +1543,10 @@ void LatchTuning() {
   g_latched.shared_dedupe = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_shared_dedupe));
   g_latched.queue_notify_idle = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_queue_notify_idle));
   g_latched.neon_swap = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_neon_swap));
-  g_latched.capture_pool = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_capture_pool));
+  // Witcher 2 queues thousands of draw snapshots per frame. Recycle their
+  // storage without opting in to the other SA2 CPU enhancements.
+  g_latched.capture_pool = REXCVAR_GET(banjo_renut_capture_pool) &&
+                           (::renut::gpu::IsDeko3D() || EnhancementActive(EnhancementGroup::kCpu, true));
   g_latched.push_point_only = EnhancementActive(EnhancementGroup::kCpu, REXCVAR_GET(banjo_renut_push_point_only));
   g_latched.pipeline_memo = REXCVAR_GET(banjo_renut_pipeline_memo);
   g_latched.cpu_memos = REXCVAR_GET(banjo_renut_cpu_memos);

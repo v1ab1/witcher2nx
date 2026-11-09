@@ -227,10 +227,9 @@ public:
   void PrefetchChainNext() const {
     const size_t n = chain_taken_.size();
     if (n >= 1) {
-      if (const u8 *s = chain_taken_[n - 1]->state.data()) {
-        for (u32 k = 0; k < 8; ++k)
-          __builtin_prefetch(s + 64 * k, 1);
-      }
+      const auto &state = chain_taken_[n - 1]->state;
+      for (size_t at = 0; at < std::min(state.size(), size_t(512)); at += 64)
+        __builtin_prefetch(state.data() + at, 1);
     }
     if (n >= 2) {
       const char *c = reinterpret_cast<const char *>(chain_taken_[n - 2]);
