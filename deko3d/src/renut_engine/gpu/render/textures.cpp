@@ -562,6 +562,10 @@ bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
       desc = plume::RenderTextureDesc::Texture(plume::RenderTextureDimension::TEXTURE_2D, w, h, 1,
                                                t.mip_levels, StackedLayers(t), format);
       view_desc = plume::RenderTextureViewDesc::Texture2D(format);
+      // Plume's deko3d 2D view selects a single layer. Inherit the image's
+      // array type so the descriptor exposes all layers to sampler2DArray.
+      if (IsDeko3D())
+        view_desc.dimension = plume::RenderTextureViewDimension::UNKNOWN;
     } else {
       desc = plume::RenderTextureDesc::Texture3D(w, h, t.depth, t.mip_levels, format);
       view_desc = plume::RenderTextureViewDesc::Texture3D(format);
@@ -760,10 +764,25 @@ void CopyDepthWords(HostTexture &t, HostTexture &source) {
   t.uploaded = true;
 }
 
+plume::RenderFormat FixedPointResolveFormat(plume::RenderFormat source, const TextureFetch &fetch) {
+  using F = plume::RenderFormat;
+  using T = GpuTextureFormat;
+  if (fetch.Dimension() != TextureDimension::Tex2D || fetch.Stacked() ||
+      fetch.Sign(0) != TextureSign::Unsigned)
+    return source;
+  if (source == F::R32_FLOAT && fetch.Format() == T::Fmt16)
+    return F::R16_UNORM;
+  if ((source == F::R16G16B16A16_FLOAT || source == F::R16G16B16A16_SNORM) &&
+      fetch.Format() == T::Fmt16_16_16_16 && fetch.Sign(1) == TextureSign::Unsigned &&
+      fetch.Sign(2) == TextureSign::Unsigned && fetch.Sign(3) == TextureSign::Unsigned)
+    return F::R16G16B16A16_UNORM;
+  return source;
+}
+
 // GetResolveTextureLocked; 'fetch' receives the header's fetch constant.
 HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderScale scale,
                            const d3d::TextureFetchConstant *header_format, bool depth,
-                           TextureFetch &fetch) {
+                           TextureFetch &fetch, bool normalize_fixed_point = false) {
   // banjo-nx (2026-10-19, render-thread proposal 3): no unconditional g_texture_epoch bump: Create and Retire bump it,
   // and so does a resolve target entry that changes (below).
   if (!texture_va)
@@ -777,6 +796,8 @@ HostTexture *ResolveTarget(u32 texture_va, plume::RenderFormat format, RenderSca
   fetch = TextureFetch::FromHeader(*header_format);
   if (!fetch.IsTexture())
     return nullptr;
+  if (normalize_fixed_point)
+    format = FixedPointResolveFormat(format, fetch);
   u32 desc[6];
   MaskedDesc(fetch, desc);
 
@@ -1383,9 +1404,10 @@ void TextureGuestExtent(const TextureFetch &fetch, uint32_t pages[2], uint32_t s
 }
 
 HostTexture *GetResolveTextureLocked(u32 texture_va, plume::RenderFormat format, RenderScale scale,
-                                     const d3d::TextureFetchConstant *header_format) {
+                                     const d3d::TextureFetchConstant *header_format,
+                                     bool normalize_fixed_point) {
   TextureFetch fetch;
-  return ResolveTarget(texture_va, format, scale, header_format, false, fetch);
+  return ResolveTarget(texture_va, format, scale, header_format, false, fetch, normalize_fixed_point);
 }
 
 HostTexture *GetDepthResolveTextureLocked(u32 texture_va, RenderScale scale,

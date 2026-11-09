@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -269,6 +270,37 @@ bool PackageScales() {
 
 #if defined(PLUME_DEKO3D)
 
+static bool ApplyFxaaFetchScale(std::string &glsl) {
+  // The translated FXAA shader samples guest fetch slots 2 and 1 at these bindings.
+  if (glsl.find("texb=0:0:384,1:8:392,2:4:388,3:0:65535") == std::string::npos)
+    return false;
+  const auto replace_samples = [&](std::string_view sample, std::string_view scaled) {
+    size_t count = 0;
+    size_t offset = 0;
+    while ((offset = glsl.find(sample, offset)) != std::string::npos) {
+      glsl.replace(offset, sample.size(), scaled);
+      offset += scaled.size();
+      ++count;
+    }
+    return count == 2;
+  };
+  if (!replace_samples("texture(dk_tex_b1, ", "w2FxaaSlot2(") ||
+      !replace_samples("texture(dk_tex_b2, ", "w2FxaaSlot1("))
+    return false;
+  const size_t main = glsl.find("void main()");
+  if (main == std::string::npos)
+    return false;
+  glsl.insert(main, R"glsl(
+vec4 w2FxaaSlot2(vec2 uv) {
+    return texture(dk_tex_b1, uv) * uintBitsToFloat(g_UboShared.v[84u].w);
+}
+vec4 w2FxaaSlot1(vec2 uv) {
+    return texture(dk_tex_b2, uv) * uintBitsToFloat(g_UboShared.v[84u].z);
+}
+)glsl");
+  return true;
+}
+
 std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
   Packages &all = Open();
   const Found found = Find(all, hash);
@@ -297,6 +329,18 @@ std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *devic
       REXLOG_ERROR("[deko3d] shader {:016X}: the GLSL did not unpack ({})", hash,
                    ZSTD_isError(n) ? ZSTD_getErrorName(n) : "short");
       return nullptr;
+    }
+  }
+  if (hash == kWitcherFxaaShader && e->stage == 4) {
+    std::string glsl(reinterpret_cast<const char *>(blob.data() + sizeof(header)), header.glslSize);
+    if (ApplyFxaaFetchScale(glsl)) {
+      header.glslSize = uint32_t(glsl.size());
+      blob.resize(sizeof(header) + glsl.size());
+      std::memcpy(blob.data(), &header, sizeof(header));
+      std::memcpy(blob.data() + sizeof(header), glsl.data(), glsl.size());
+      REXLOG_INFO("[deko3d] Restored guest texture fetch exponent adjustments in FXAA");
+    } else {
+      REXLOG_WARN("[deko3d] Unrecognized FXAA GLSL layout for texture fetch exponent adjustments");
     }
   }
   auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);

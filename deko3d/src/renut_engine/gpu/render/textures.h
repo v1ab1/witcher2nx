@@ -263,7 +263,8 @@ void TextureGuestExtent(const TextureFetch &fetch, uint32_t pages[2], uint32_t s
 // it was when the resolve was recorded (the header may be a temporary the
 // game has since overwritten).
 HostTexture *GetResolveTextureLocked(u32 texture_va, plume::RenderFormat format, RenderScale scale,
-                                     const d3d::TextureFetchConstant *header_format = nullptr);
+                                     const d3d::TextureFetchConstant *header_format,
+                                     bool normalize_fixed_point);
 
 // The same for a depth resolve: a kDepthResolveFormat target plus the guest
 // words (kDepthResolveWordsFormat), which a texture of a 32-bit 8_8_8_8

@@ -4,6 +4,7 @@
  *          list management for the native renderer.
  */
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/gpu/backend/water_capture.h"
 
 #include <cstdio>
 #include <mutex>
@@ -282,6 +283,64 @@ bool BuildPresentPipeline(VideoState &s) {
   return true;
 }
 
+// The game writes downsampled D24FS8 words through an RGBA8 color view of
+// EDRAM. Reopen that view as depth for the half-resolution particle pass.
+void BuildPackedParticleDepthPipeline(VideoState &s) {
+#if defined(PLUME_DEKO3D)
+  if (!IsDeko3D())
+    return;
+  constexpr char source[] = R"glsl(#version 460
+// banjo-dk ubo=0x20 ssbo=0x0 tex=1
+#extension GL_ARB_bindless_texture : require
+layout(std140, binding = 5) uniform UtilityPush {
+    vec2 scale;
+    vec2 translate;
+    uint textureIndex;
+    uint samplerIndex;
+    float halfTileWidth;
+    float unused;
+} pushData;
+void main() {
+    vec2 pixel = gl_FragCoord.xy;
+    float halfTile = pushData.halfTileWidth;
+    // Color and depth address the two 40-pixel halves in opposite order.
+    pixel.x += mod(floor(pixel.x / halfTile), 2.0) == 0.0 ? halfTile : -halfTile;
+    uint image = pushData.textureIndex;
+    vec4 color = texelFetch(sampler2D(uvec2(image, 0u)), ivec2(pixel), 0);
+    uvec3 bytes = uvec3(color.gba * 255.0 + 0.5);
+    uint depth = bytes.x | (bytes.y << 8) | (bytes.z << 16);
+    uint exponent = depth >> 20;
+    uint mantissa = depth & 0xfffffu;
+    gl_FragDepth = exponent == 0u ? float(mantissa) * 5.820766091346741e-11
+                                 : uintBitsToFloat(((exponent + 112u) << 23) | (mantissa << 3));
+}
+)glsl";
+  const plume::Deko3DShaderBlob header{plume::Deko3DShaderBlob::Magic, DkStage_Fragment,
+                                     sizeof(source) - 1, 0};
+  uint8_t blob[sizeof(header) + sizeof(source) - 1];
+  std::memcpy(blob, &header, sizeof(header));
+  std::memcpy(blob + sizeof(header), source, sizeof(source) - 1);
+  auto shader = CreateHostShader(s.device.get(), {.deko3d = blob, .deko3d_size = sizeof(blob)},
+                                 "packed_particle_depth_ps");
+  if (!shader)
+    return;
+
+  plume::RenderGraphicsPipelineDesc desc;
+  desc.pipelineLayout = s.utility_layout.get();
+  desc.vertexShader = s.present_vs.get();
+  desc.pixelShader = shader.get();
+  desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+  desc.cullMode = plume::RenderCullMode::NONE;
+  desc.depthTargetFormat = plume::RenderFormat::D32_FLOAT_S8_UINT;
+  desc.depthEnabled = true;
+  desc.depthWriteEnabled = true;
+  desc.depthFunction = plume::RenderComparisonFunction::ALWAYS;
+  auto pipeline = s.device->createGraphicsPipeline(desc);
+  if (GraphicsPipelineCreated(pipeline.get()))
+    s.packed_particle_depth_pipeline = std::move(pipeline);
+#endif
+}
+
 // See depth_resolve.hlsli; present_vs draws the fullscreen triangle.
 bool BuildDepthResolvePipelines(VideoState &s) {
   // banjo-nx (2026-10-18): the colour resolves drawn on deko3d (DrawResolveCopy); optional.
@@ -318,6 +377,7 @@ bool BuildDepthResolvePipelines(VideoState &s) {
       s.depth_resolve_float_pipeline[i]->setName(i ? "renut depth resolve, depth only (msaa)"
                                                    : "renut depth resolve, depth only");
   }
+  BuildPackedParticleDepthPipeline(s);
   return true;
 }
 
@@ -457,6 +517,7 @@ void DrainSlot(VideoState &s, uint32_t slot) {
       s.texture_set->setTexture(index, poison ? s.poison_texture.get() : s.null_texture.get(),
                                 plume::RenderTextureLayout::SHADER_READ,
                                 poison ? s.poison_texture_view.get() : s.null_texture_view.get());
+      TrackWaterCaptureTextureLocked(index, nullptr, nullptr);
       if (s.texture_slot_used[index] && s.texture_slots_in_use)
         --s.texture_slots_in_use;
       s.texture_slot_used[index] = false;
@@ -1178,6 +1239,7 @@ void Video::SetTextureSlotLocked(uint32_t slot, plume::RenderTexture *texture,
   if (slot >= kTextureDescriptorCount)
     return;
   State().texture_set->setTexture(slot, texture, plume::RenderTextureLayout::SHADER_READ, view);
+  TrackWaterCaptureTextureLocked(slot, texture, view);
 }
 
 uint32_t Video::TextureSlotsInUseLocked() {

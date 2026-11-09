@@ -14,6 +14,8 @@ struct RenderShader;
 
 namespace banjo::renut_gpu::deko3d {
 
+inline constexpr uint64_t kWitcherFxaaShader = 0x14830D3955814FE1ull;
+
 // Whether the NRO carries the GLSL package (Switch builds made with one).
 bool PackageAvailable();
 

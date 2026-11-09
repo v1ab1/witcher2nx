@@ -27,6 +27,7 @@
 #include "renut_engine/gpu/banjo_renut_tuning.h"
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/gpu/backend/water_capture.h"
 #include "renut_engine/gpu/backend/video_internal.h"
 #include "renut_engine/gpu/banjo_renut_capture.h"
 #if defined(PLUME_DEKO3D)
@@ -581,6 +582,7 @@ void Video::Present(const PresentImage *image) {
   std::lock_guard lock(s.mutex);
   if (!s.host_ready || s.shutting_down.load(std::memory_order_acquire))
     return;
+  FinishWaterCaptureFrameLocked(s, image);
   PresentLocked(s, image);
   s.last_guest_present_ms.store(NowMs(), std::memory_order_release);
   detail::LatencyTrimLocked(s);  // banjo-nx (2026-10-20, input latency, banjo_deko3d_latency_trim)
