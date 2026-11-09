@@ -3,6 +3,9 @@
 - The SDK snapshot and Switch build tooling come from
   [SA2-NX at baf523b](https://github.com/ChanseyIsTheBest/sa2-nx/tree/baf523b8e93a1b02d8b73d13aebf86780f8cc0c6).
   The inherited tooling carries the upstream [GPL-3.0 license](LICENSE).
+- The deko3d branch also adapts the Renut renderer from that SA2-NX snapshot,
+  including its host shaders. The build uses the snapshot's Plume, uam and
+  reblue-XenosRecomp dependencies. Their licenses are in the SA2-NX checkout.
 - The SDK is based on [ReXGlue](https://github.com/rexglue/rexglue-sdk), by Tom
   Clay with code from Xenia and its contributors. The Horizon layer originated
   in [nfsmw-nx](https://github.com/StevensND/nfsmw-nx). See the SDK's

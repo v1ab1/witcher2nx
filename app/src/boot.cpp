@@ -19,6 +19,14 @@
 
 #include "witcher2_init.h"
 
+#if REX_PLATFORM_SWITCH
+#include <switch.h>
+
+REXCVAR_DEFINE_BOOL(witcher2_job_wait_yield, true, "Witcher 2/Performance",
+                    "Yield the CPU when a worker repeatedly polls a job batch dependency.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+#endif
+
 #if defined(WITCHER2_RENDERER)
 REX_EXTERN(__imp__VdInitializeRingBuffer);
 #endif
@@ -153,6 +161,10 @@ int Fail(const char* message, unsigned status) {
   ShowStatus(message);
   return EXIT_FAILURE;
 }
+#else
+bool IsExplicitLoadingScreen(uint32_t worker, uint8_t* base) {
+  return REX_LOAD_U32(worker + 624) || REX_LOAD_U32(worker + 628);
+}
 #endif
 
 }  // namespace
@@ -167,8 +179,7 @@ bool Witcher2ShouldDrainLoadingQueue(PPCContext& ctx, uint8_t* base) {
   const uint32_t pending = REX_LOAD_U32(worker + 20);
   static thread_local bool just_updated = false;
   static thread_local std::chrono::steady_clock::time_point next_update;
-  const bool loading_screen_active =
-      REX_LOAD_U32(worker + 624) || REX_LOAD_U32(worker + 628);
+  const bool loading_screen_active = IsExplicitLoadingScreen(worker, base);
   if (!loading_screen_active || pending < kLoadingQueueBacklog) {
     just_updated = false;
     next_update = {};
@@ -191,6 +202,32 @@ bool Witcher2ShouldDrainLoadingQueue(PPCContext& ctx, uint8_t* base) {
   return false;
 #endif
 }
+
+bool Witcher2ShouldDeferIdleLoadingFrame(PPCContext& ctx, uint8_t* base) {
+#if defined(WITCHER2_RENDERER)
+  // The Xbox render worker starts presenting a blurred frame with a spinner
+  // after a 50 ms gap. Give normal gameplay frames more time before falling
+  // back to it. Keep startup and explicit loading screens on the guest timer.
+  constexpr double kIdleLoadingDelaySeconds = 3.0;
+  return ctx.f0.f64 > 0.0 && ctx.f13.f64 < kIdleLoadingDelaySeconds &&
+         !ctx.r30.u8 && !IsExplicitLoadingScreen(ctx.r26.u32, base);
+#else
+  return false;
+#endif
+}
+
+#if REX_PLATFORM_SWITCH
+void Witcher2YieldJobWait() {
+  static const bool enabled = [] {
+    const bool yield = REXCVAR_GET(witcher2_job_wait_yield);
+    REXLOG_INFO("[jobs] Yield during batch dependency wait: {}", yield);
+    return yield;
+  }();
+  if (enabled) {
+    svcSleepThread(YieldType_WithoutCoreMigration);
+  }
+}
+#endif
 
 bool RegisterGuestFunctions(rex::Runtime& runtime) {
   const auto module = runtime.kernel_state()->GetExecutableModule();

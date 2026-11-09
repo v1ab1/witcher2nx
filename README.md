@@ -1,5 +1,8 @@
 # Witcher2NX
 
+This branch contains the experimental [deko3d renderer](deko3d/README.md)
+used in the 0.1.14 test build. The original Vulkan build is documented below.
+
 Experimental Nintendo Switch homebrew port of **The Witcher 2: Assassins of Kings**.
 It statically recompiles the Xbox 360 executable with ReXGlue and renders through
 the Xenos Vulkan backend and Mesa NVK on Horizon.
