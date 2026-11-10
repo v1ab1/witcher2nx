@@ -90,4 +90,4 @@ set_source_files_properties("${REXGLUE_SHARE_DIR}/rex_app.cpp" PROPERTIES
     COMPILE_DEFINITIONS "REXGLUE_BUILD_CONFIG=\"$<CONFIG>\"" SKIP_PRECOMPILE_HEADERS ON)
 target_link_libraries(witcher2_deko PRIVATE rex::runtime w2_d3d plume o1heap)
 target_link_options(witcher2_deko PRIVATE LINKER:--wrap=nvGpuChannelAppendEntry)
-rexglue_switch_add_nro(witcher2_deko NAME "The Witcher 2 deko3d" VERSION 0.1.21)
+rexglue_switch_add_nro(witcher2_deko NAME "The Witcher 2 deko3d" VERSION 0.1.32)

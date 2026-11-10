@@ -1,6 +1,7 @@
 // banjo-nx (2026-10-17): see banjo_renut_tuning.h.
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/perf/frame_stats.h"
 #include <rex/frame_latency.h>
 #include "renut_engine/display_sync.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
@@ -600,6 +601,8 @@ struct Stats {
   struct Half {
     uint64_t game_frames = 0, render_frames = 0, gpu_frames = 0;
     double render_ms = 0.0, gpu_ms = 0.0, seconds = 0.0;
+    double render_wait_ms = 0.0, gpu_list_gap_ms = 0.0, gpu_frame_gap_ms = 0.0;
+    uint64_t gpu_list_gap_frames = 0, gpu_frame_gap_frames = 0;
   };
   Half total, halves[2];   // halves[1]: the part on, [0]: off
   int half = 1;            // the half now running (the render thread applies it)
@@ -709,6 +712,15 @@ void StatsGameFrame() {
               kicks, fence_queries, exact_stale, late_stale, evicted,
               bool_draws,
               bool_generic, bool_built, tess_vertices, tess_corners);
+  const auto waits = renut::frame_stats::TakeGameWaitTimes();
+  REXLOG_INFO("[renut] frame path: game waits {:.2f} ms swap queue and {:.2f} ms fences per game frame; "
+              "render waits {:.2f} ms per render frame; GPU gaps {:.2f} ms between lists ({} frames) and "
+              "{:.2f} ms between frames ({} pairs)",
+              waits.swap_queue_ms / std::max<uint64_t>(1, t.game_frames),
+              waits.fence_ms / std::max<uint64_t>(1, t.game_frames),
+              t.render_wait_ms / std::max<uint64_t>(1, t.render_frames),
+              t.gpu_list_gap_ms / std::max<uint64_t>(1, t.gpu_list_gap_frames), t.gpu_list_gap_frames,
+              t.gpu_frame_gap_ms / std::max<uint64_t>(1, t.gpu_frame_gap_frames), t.gpu_frame_gap_frames);
   if (g_latched_ready.load(std::memory_order_acquire) && g_latched.store_cards) {
     const uint64_t clean = g_cards_clean.exchange(0, std::memory_order_relaxed);
     const uint64_t clean_bytes = g_cards_clean_bytes.exchange(0, std::memory_order_relaxed);
@@ -855,7 +867,7 @@ void StatsGameFrame() {
   g_stats.last_report = now;
 }
 
-void StatsRenderThreadFrame(double busy_ms) {
+void StatsRenderThreadFrame(double busy_ms, double wait_ms) {
   ControlNvkLocked();  // banjo_gpu_nvk_draw_contract (the Switch): requests and guards, once a frame
   int half, target;
   bool apply;
@@ -863,6 +875,7 @@ void StatsRenderThreadFrame(double busy_ms) {
     std::lock_guard lock(g_stats.mutex);
     ++g_stats.total.render_frames;
     g_stats.total.render_ms += busy_ms;
+    g_stats.total.render_wait_ms += wait_ms;
     ++g_stats.halves[g_stats.half].render_frames;
     g_stats.halves[g_stats.half].render_ms += busy_ms;
     target = REXCVAR_GET(banjo_renut_ab_target);
@@ -874,10 +887,18 @@ void StatsRenderThreadFrame(double busy_ms) {
     AbApply(target, half == 1);
 }
 
-void StatsGpuFrame(double ms) {
+void StatsGpuFrame(double ms, std::optional<double> list_gap_ms, std::optional<double> frame_gap_ms) {
   std::lock_guard lock(g_stats.mutex);
   ++g_stats.total.gpu_frames;
   g_stats.total.gpu_ms += ms;
+  if (list_gap_ms) {
+    g_stats.total.gpu_list_gap_ms += *list_gap_ms;
+    ++g_stats.total.gpu_list_gap_frames;
+  }
+  if (frame_gap_ms) {
+    g_stats.total.gpu_frame_gap_ms += *frame_gap_ms;
+    ++g_stats.total.gpu_frame_gap_frames;
+  }
   ++g_stats.halves[g_stats.half].gpu_frames;
   g_stats.halves[g_stats.half].gpu_ms += ms;
 }

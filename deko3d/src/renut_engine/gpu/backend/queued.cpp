@@ -349,7 +349,7 @@ constexpr DeltaChunkList kDeltaAllChunks = MakeDeltaChunkList(false);
 constexpr DeltaChunkList kDeltaReadChunks = MakeDeltaChunkList(true);
 static_assert(kDeltaReadChunks.count == 40);
 // sa2-nx (2026-10-28, sa2_renut_setter_marks): the same lists as chunk masks (bit i % 64 of word i / 64), and the
-// chunks every draw compares whatever the marks say: the vertex declaration's (0x2FC0, set inline without a tag).
+// chunks every draw captures even when no setter marked them.
 constexpr sa2::renut::ChunkBits MakeDeltaChunkMask(const DeltaChunkList &l) {
   sa2::renut::ChunkBits b{};
   for (u32 k = 0; k < l.count; ++k)
@@ -358,10 +358,18 @@ constexpr sa2::renut::ChunkBits MakeDeltaChunkMask(const DeltaChunkList &l) {
 }
 constexpr sa2::renut::ChunkBits kDeltaAllMask = MakeDeltaChunkMask(kDeltaAllChunks);
 constexpr sa2::renut::ChunkBits kDeltaReadMask = MakeDeltaChunkMask(kDeltaReadChunks);
-constexpr sa2::renut::ChunkBits kMarksAlways = sa2::renut::MarkBits(d3d::kDeviceOffsetVertexDeclaration, 4);
+// Witcher 2 also changes texture fetch constants and bound texture pointers
+// without a dirty tag. Include both arrays because the affected slots depend
+// on the draw. The periodic full comparison still checks for other misses.
+constexpr sa2::renut::ChunkBits kTextureChunks =
+    sa2::renut::MarkBits(kDeltaUnreadEnd, sizeof(d3d::Constants::TextureFetch)) |
+    sa2::renut::MarkBits(d3d::kDeviceOffsetTextures, d3d::kTextureFetchSlots * sizeof(be_u32));
+constexpr sa2::renut::ChunkBits kMarksAlways =
+    sa2::renut::MarkBits(d3d::kDeviceOffsetVertexDeclaration, 4) | kTextureChunks;
 static_assert(sa2::renut::kMarkHeadChunks == kDeltaHeadChunks && sa2::renut::kMarkTailBegin == kDeltaTailBegin &&
               sa2::renut::kMarkSnapshotEnd == d3d::kDeviceSnapshotSize);
-static_assert(kMarksAlways.w[0] == uint64_t(1) << 63 && kMarksAlways.w[1] == 0);  // chunk 63: 0x2FC0
+static_assert((kMarksAlways.w[0] & kDeltaReadMask.w[0]) == kMarksAlways.w[0] &&
+              (kMarksAlways.w[1] & kDeltaReadMask.w[1]) == kMarksAlways.w[1]);
 // Whether device byte 'at' is one the render thread reads (the verify mode compares those).
 constexpr bool DeltaByteRead(u32 at) {
   return !(at < kDeltaUnreadEnd || (at >= kDeltaPrivateUnreadBegin && at < kDeltaPrivateUnreadEnd));
@@ -572,7 +580,7 @@ const u8 *DeviceForDraw(const DrawCapture &capture) {
     }
   }
   if (!capture.verify.empty()) {
-    g_delta_verified.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t checked = g_delta_verified.fetch_add(1, std::memory_order_relaxed) + 1;
     // sa2-nx (sa2_renut_snapshot_deltas_narrow): the bytes the render thread reads; with the narrow compare off, all.
     bool same;
     if (DeltasNarrowOn()) {
@@ -598,6 +606,10 @@ const u8 *DeviceForDraw(const DrawCapture &capture) {
                   capture.verify[at]);
       }
     }
+    // Witcher 2 does not use the pacing hook that prints SnapshotDeltaReport.
+    if ((checked % 8192) == 0)
+      REXLOG_INFO("[renut] device snapshot verification: {} draws checked, {} differ", checked,
+                  g_delta_differ.load(std::memory_order_relaxed));
   }
   return g_delta_device;
 }
@@ -749,12 +761,22 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
           for (uint64_t bits = todo[word]; bits; bits &= bits - 1) {
             const u32 at = DeltaChunkOffset(word * 64 + u32(std::countr_zero(bits)));
             __builtin_prefetch(bytes + at);
-            __builtin_prefetch(c.shadow + at, 1);
+            __builtin_prefetch(c.shadow + at);
           }
         }
+        // These chunks are candidates on every draw because the guest can
+        // write them without a mark. Compare them before putting them in
+        // the queue so unchanged texture state stays on the render thread.
+        u32 copied = 0;
         for (u32 word = 0; word < 2; ++word) {
           for (uint64_t bits = todo[word]; bits; bits &= bits - 1) {
-            const u32 i = word * 64 + u32(std::countr_zero(bits));
+            const u32 bit_index = u32(std::countr_zero(bits));
+            const u32 i = word * 64 + bit_index;
+            const uint64_t bit = uint64_t(1) << bit_index;
+            if (kTextureChunks.w[word] & bit) {
+              compare(i);
+              continue;
+            }
             const u32 at = DeltaChunkOffset(i), size = DeltaChunkSize(i);
             if (size == kDeltaUnitBytes) {
               std::memcpy(c.shadow + at, bytes + at, kDeltaUnitBytes);
@@ -764,12 +786,13 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
               std::memcpy(to, bytes + at, size);
             }
             to += size;
+            h.chunks[word] |= bit;
+            ++copied;
           }
         }
-        h.chunks[0] = todo[0];
-        h.chunks[1] = todo[1];
-        chunks = marked_count;
-        c.copied += marked_count;
+        chunks += copied;
+        c.copied += copied;
+        c.compared += marked_count - copied;
       } else {
         for (u32 word = 0; word < 2; ++word) {
           for (uint64_t bits = todo[word]; bits; bits &= bits - 1) {

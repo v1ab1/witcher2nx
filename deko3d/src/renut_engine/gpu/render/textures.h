@@ -111,6 +111,9 @@ struct HostTexture {
   // 'resolves' counts the resolves into it.
   std::unique_ptr<HostTexture> words;  // a bare target: texture and layout
   std::unique_ptr<plume::RenderFramebuffer> depth_framebuffer;
+  // Packed particle depth writes the R32F resolve and depth attachment together.
+  std::unique_ptr<plume::RenderFramebuffer> packed_depth_framebuffer;
+  uint64_t packed_depth_generation = 0;
   // banjo-nx (2026-10-18): a resolve destination as the target of DrawResolveCopy (draw.cpp), made at its first one.
   std::unique_ptr<plume::RenderFramebuffer> copy_framebuffer;
   uint64_t resolves = 0;

@@ -11,6 +11,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <optional>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -126,6 +128,7 @@ struct VideoState {
   plume::RenderCommandList *pending_list = nullptr;
   uint64_t pending_ticket = 0;
   uint32_t list_draws = 0;
+  std::chrono::steady_clock::time_point frame_recording_start;
   // Bumped each time a command list begins; bound state cached against an
   // older value has to be set again.
   uint64_t list_generation = 0;
@@ -136,6 +139,8 @@ struct VideoState {
   static constexpr uint32_t kTimedLists = 32;
   std::unique_ptr<plume::RenderQueryPool> timestamps[kFramesInFlight];
   uint32_t timed_lists[kFramesInFlight] = {};  // pairs begun in the slot's frame
+  bool timed_frame_complete[kFramesInFlight] = {};
+  uint64_t previous_gpu_end = 0;
   bool timing_open = false;                    // the open list wrote its first timestamp
   // Swapchain; present semaphores are per swapchain image (a binary semaphore
   // can only be re-signalled once its image has been re-acquired).
@@ -179,7 +184,9 @@ struct VideoState {
   std::unique_ptr<plume::RenderPipeline> depth_resolve_pipeline[2];
   // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): the same with the words target's writes masked off.
   std::unique_ptr<plume::RenderPipeline> depth_resolve_float_pipeline[2];
+  std::unique_ptr<plume::RenderPipeline> depth_resolve_single_target_pipeline;
   std::unique_ptr<plume::RenderPipeline> packed_particle_depth_pipeline;
+  std::unique_ptr<plume::RenderPipeline> packed_particle_depth_resolve_pipeline;
   // Host mip levels of scaled resolve destinations (textures.cpp); null when
   // it failed to build, which leaves them single-level.
   std::unique_ptr<plume::RenderShader> texture_mip_ps;
@@ -306,7 +313,8 @@ public:
   // banjo-nx (2026-10-19, banjo_deko3d_kick_submit / banjo_deko3d_ring_cleaner): the game kicked its ring and its
   // fills are done (QueueKickFlush): the upload ring written so far goes to the cleaner, the list ended at the last
   // kick to the GPU, and the open list ends here when it holds enough draws. And a draw recorded into the open list.
-  static void KickLocked();
+  static bool KickLocked();
+  static std::optional<bool> PreviousFrameGpuDoneLocked();
   static void NoteDrawLocked();
   static plume::RenderCommandList *CommandListLocked();
   static UploadRing &UploadsLocked();

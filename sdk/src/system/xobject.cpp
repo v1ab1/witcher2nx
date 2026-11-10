@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <array>
 #include <vector>
 
 #include <rex/chrono/clock.h>
@@ -257,11 +258,16 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
   }
 }
 
-X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_type,
+X_STATUS XObject::WaitMultiple(uint32_t count, const object_ref<XObject>* objects, uint32_t wait_type,
                                uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout) {
   ApplyGuestCoreLayoutAtWait();  // sa2-nx (2026-10-20)
-  std::vector<rex::thread::WaitHandle*> wait_handles(count);
+  std::array<rex::thread::WaitHandle*, 8> local_handles;
+  std::vector<rex::thread::WaitHandle*> heap_handles;
+  if (count > local_handles.size()) {
+    heap_handles.resize(count);
+  }
+  auto* wait_handles = heap_handles.empty() ? local_handles.data() : heap_handles.data();
   for (size_t i = 0; i < count; ++i) {
     wait_handles[i] = objects[i]->GetWaitHandle();
     assert_not_null(wait_handles[i]);
@@ -274,7 +280,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
   XThread::CheckTitleTermination();
   if (wait_type) {
     auto result =
-        rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
+        rex::thread::WaitAny(wait_handles, count, alertable ? true : false, timeout_ms);
     XThread::CheckTitleTermination();
     switch (result.first) {
       case rex::thread::WaitResult::kSuccess:
@@ -295,7 +301,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
     }
   } else {
     auto result =
-        rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
+        rex::thread::WaitAll(wait_handles, count, alertable ? true : false, timeout_ms);
     XThread::CheckTitleTermination();
     switch (result) {
       case rex::thread::WaitResult::kSuccess:

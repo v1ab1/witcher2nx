@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <utility>
 
 // Counter 0 of the console profiler: presented frames, which the Status Monitor overlay's FPS (SaltyNX) and the
 // profiler's "game N fps" are made from (sdk/src/ui/switch_perf.cpp; a stub on the PC, me_pc_stubs.cpp).
@@ -30,6 +31,7 @@ struct State {
   double window_worst = 0.0;
   double gpu_sum = 0.0, render_sum = 0.0, wait_sum = 0.0;
   int gpu_n = 0, render_n = 0;
+  GameWaitTimes game_waits;
 };
 
 State& S() {
@@ -82,8 +84,8 @@ void OnGameFrame() {
   }
 }
 
-void OnGpuFrame(double ms) {
-  banjo::renut_gpu::StatsGpuFrame(ms);
+void OnGpuFrame(double ms, std::optional<double> list_gap_ms, std::optional<double> frame_gap_ms) {
+  banjo::renut_gpu::StatsGpuFrame(ms, list_gap_ms, frame_gap_ms);
   banjo::profiler::SetGpuFrameMs(ms);  // the profiler window's "GPU Frame" (package 27: nobody fed it before)
   State& s = S();
   std::lock_guard lock(s.mutex);
@@ -91,8 +93,8 @@ void OnGpuFrame(double ms) {
   ++s.gpu_n;
 }
 
-void OnRenderThreadFrame(double busy_ms) {
-  banjo::renut_gpu::StatsRenderThreadFrame(busy_ms);
+void OnRenderThreadFrame(double busy_ms, double wait_ms) {
+  banjo::renut_gpu::StatsRenderThreadFrame(busy_ms, wait_ms);
   // The profiler window (package 27): the render thread's frame ends with its present, so this is also the time
   // between two host presents ("Present"); one thread, as RecordHostPresent needs.
   banjo::profiler::SetRenderThreadMs(busy_ms);
@@ -106,10 +108,20 @@ void OnRenderThreadFrame(double busy_ms) {
   ++s.render_n;
 }
 
-void OnGameThreadWait(double ms) {
+void OnGameThreadWait(GameWait kind, double ms) {
   State& s = S();
   std::lock_guard lock(s.mutex);
   s.wait_sum += ms;
+  if (kind == GameWait::SwapQueue)
+    s.game_waits.swap_queue_ms += ms;
+  else
+    s.game_waits.fence_ms += ms;
+}
+
+GameWaitTimes TakeGameWaitTimes() {
+  State& s = S();
+  std::lock_guard lock(s.mutex);
+  return std::exchange(s.game_waits, GameWaitTimes{});
 }
 
 Snapshot Get() {

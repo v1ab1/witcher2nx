@@ -499,7 +499,7 @@ void KickDevice(d3d::Device *device, u32 device_va) {
   FlushDeferredVertices(device_va);
   // banjo-nx (package 27c): the texture fills too (they were read at the submit, after this fence had let the game
   // rewrite them).
-  banjo::renut_gpu::checks::QueueKickFlush();
+  banjo::renut_gpu::checks::QueueKickFlush(banjo::renut_gpu::checks::KickOrigin::Device);
   KickFence(reinterpret_cast<u8 *>(device));
 }
 
@@ -613,6 +613,7 @@ u32 BlockOnFence_hook(u32 device_va, u32 fence, u32 /*type*/, u32 /*no_kick*/) {
       break;  // no render thread: nothing would complete it
   }
   renut::frame_stats::OnGameThreadWait(
+      renut::frame_stats::GameWait::Fence,
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waiting).count());
   return 0;
 }
@@ -924,7 +925,7 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     // banjo-nx (package 27c): the frame's last vertex and texture fills are read here, before the Swap's fence
     // completes. They were read at the present, after it: the game, told the frame was done, could rewrite a dynamic
     // buffer for the next frame first, and the frame's last draws (the composite, the HUD) took the new bytes.
-    banjo::renut_gpu::checks::QueueKickFlush();
+    banjo::renut_gpu::checks::QueueKickFlush(banjo::renut_gpu::checks::KickOrigin::Swap);
     KickFence(device);
     // sa2-nx: banjo-nx's banjo_renut_game_gamma (N&B's +0x3A9C) is not taken; SA2's ramp goes to the present above
     // (sa2_renut_gamma_ramp).

@@ -5,7 +5,9 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +16,7 @@
 
 #include <fmt/format.h>
 #include <rex/logging.h>
+#include <xxhash.h>
 #include <zstd.h>
 
 #include "renut_engine/gpu/banjo_renut_tuning.h"
@@ -301,6 +304,137 @@ vec4 w2FxaaSlot1(vec2 uv) {
   return true;
 }
 
+struct TextureSizeQuery {
+  uint32_t binding;
+  uint32_t components;
+  uint32_t count;
+};
+
+static bool ApplyWitcherTextureSizes(std::string &glsl, std::string_view usage,
+                                    std::initializer_list<TextureSizeQuery> queries) {
+  // The shader package predates the txq pass. Use the same size buffer and
+  // specialization modes as shaders built with that pass.
+  const size_t header = glsl.find(usage);
+  const size_t main = glsl.find("void main()");
+  const size_t end = glsl.find_last_not_of(" \r\n\t");
+  if (header == std::string::npos || main == std::string::npos || end == std::string::npos ||
+      header + usage.size() >= main || main >= end ||
+      glsl[header + usage.size()] != '\n' || glsl[end] != '}' ||
+      glsl.find("g_banjoTxq") != std::string::npos ||
+      glsl.find("out vec4 out_var_SV_Target0;") == std::string::npos)
+    return false;
+
+  std::string body = glsl.substr(main, end - main);
+  uint64_t mask = 0;
+  for (const auto &[binding, components, expected] : queries) {
+    const std::string query = fmt::format("textureSize(dk_tex_b{}, 0)", binding);
+    const std::string constant = fmt::format("ivec{}(g_UboTexSize.v[{}u].{})", components, binding,
+                                             components == 2 ? "xy" : "xyz");
+    const std::string replacement = fmt::format(
+        "((g_banjoTxq == 1u) ? {} : ((g_banjoTxq == 2u) ? w2CheckSize({}, {}) : {}))",
+        constant, constant, query, query);
+    size_t count = 0;
+    for (size_t offset = 0; (offset = body.find(query, offset)) != std::string::npos;) {
+      body.replace(offset, query.size(), replacement);
+      offset += replacement.size();
+      ++count;
+    }
+    if (count != expected)
+      return false;
+    mask |= uint64_t{1} << binding;
+  }
+  body += R"glsl(
+    if (g_banjoTxq == 2u && w2TextureSizeMismatch)
+        out_var_SV_Target0 = vec4(1.0, 0.0, 1.0, 1.0);
+)glsl";
+  glsl.replace(main, end - main, body);
+  glsl.insert(main, R"glsl(
+#ifndef SPIRV_CROSS_CONSTANT_ID_908
+#define SPIRV_CROSS_CONSTANT_ID_908 1u
+#endif
+const uint g_banjoTxq = SPIRV_CROSS_CONSTANT_ID_908;
+layout(binding = 3, std140) uniform type_DkTexSize
+{
+    uvec4 v[64];
+} g_UboTexSize;
+bool w2TextureSizeMismatch = false;
+ivec2 w2CheckSize(ivec2 size, ivec2 query)
+{
+    w2TextureSizeMismatch = w2TextureSizeMismatch || any(notEqual(size, query));
+    return query;
+}
+ivec3 w2CheckSize(ivec3 size, ivec3 query)
+{
+    w2TextureSizeMismatch = w2TextureSizeMismatch || any(notEqual(size, query));
+    return query;
+}
+)glsl");
+  glsl.insert(header + usage.size(), fmt::format(" txq=0x{:x}", mask));
+  glsl[header + std::string_view("// banjo-dk ubo=0x").size()] = 'e';
+  return true;
+}
+
+static bool ApplyWitcherFragmentTests(std::string &glsl) {
+  constexpr std::string_view alpha_test = "if (!((g_UboShared.v[34u].w == 0u) ? false : ";
+  const size_t main = glsl.find("void main()");
+  const size_t alpha = glsl.find(alpha_test, main);
+  if (main == std::string::npos || alpha == std::string::npos ||
+      glsl.find("SPIRV_CROSS_CONSTANT_ID_903") != std::string::npos ||
+      glsl.find("SPIRV_CROSS_CONSTANT_ID_909") != std::string::npos)
+    return false;
+
+  // 903 = 8 means the guest alpha test is ALWAYS. Other modes use the original
+  // compare, and the separate blend-related discards still apply.
+  glsl.insert(alpha + std::string_view("if (").size(), "!w2AlphaAlways && ");
+  glsl.insert(main, R"glsl(
+#ifndef SPIRV_CROSS_CONSTANT_ID_903
+#define SPIRV_CROSS_CONSTANT_ID_903 0u
+#endif
+const bool w2AlphaAlways = SPIRV_CROSS_CONSTANT_ID_903 == 8u;
+#ifndef SPIRV_CROSS_CONSTANT_ID_909
+#define SPIRV_CROSS_CONSTANT_ID_909 0u
+#endif
+#if SPIRV_CROSS_CONSTANT_ID_909
+layout(early_fragment_tests) in;
+#endif
+)glsl");
+  return true;
+}
+
+static bool ApplyWitcherAmbientShadowBranch(std::string &glsl) {
+  const size_t begin = glsl.find("    float _425 = ");
+  const size_t end = glsl.find("    vec4 _882 = ", begin);
+  if (begin == std::string::npos || end == std::string::npos)
+    return false;
+
+  // Check the translated block before relying on its live outputs. The original
+  // shadow lookups already run only for _424. Keeping them in one branch lets
+  // the compiler remove the repeated predication between lookups.
+  std::string shadow = glsl.substr(begin, end - begin);
+  if (XXH3_64bits(shadow.data(), shadow.size()) != 0x2B7BE75BDFE8C3E4ull)
+    return false;
+
+  for (const std::string_view decl : {"    vec4 _681;\n", "    vec4 _743;\n", "    vec4 _843;\n"})
+    shadow.erase(shadow.find(decl), decl.size());
+  shadow.erase(shadow.find("float _870"), sizeof("float ") - 1);
+  glsl.replace(begin, end - begin, fmt::format(R"glsl(    vec4 _681;
+    vec4 _743;
+    vec4 _843;
+    float _870;
+    if (_424)
+    {{
+#define _424 true
+{}#undef _424
+    }}
+    else
+    {{
+#define _424 false
+{}#undef _424
+    }}
+)glsl", shadow, shadow));
+  return true;
+}
+
 std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *device, uint64_t hash) {
   Packages &all = Open();
   const Found found = Find(all, hash);
@@ -331,16 +465,50 @@ std::unique_ptr<plume::RenderShader> CreateGameShader(plume::RenderDevice *devic
       return nullptr;
     }
   }
-  if (hash == kWitcherFxaaShader && e->stage == 4) {
+  if (e->stage == 4 && WitcherFragmentTuned(hash)) {
     std::string glsl(reinterpret_cast<const char *>(blob.data() + sizeof(header)), header.glslSize);
-    if (ApplyFxaaFetchScale(glsl)) {
+    bool texture_sizes = false;
+    switch (hash) {
+      case kWitcherFxaaShader:
+        if (ApplyFxaaFetchScale(glsl))
+          REXLOG_INFO("[deko3d] Restored guest texture fetch exponent adjustments in FXAA");
+        else
+          REXLOG_WARN("[deko3d] Unrecognized FXAA GLSL layout for texture fetch exponent adjustments");
+        texture_sizes = ApplyWitcherTextureSizes(
+            glsl, "// banjo-dk ubo=0x6 ssbo=0x0 tex=0 texb=0:0:384,1:8:392,2:4:388,3:0:65535", {{3, 2, 4}});
+        break;
+      case 0x5F549466E8736C3Cull:
+        texture_sizes = ApplyWitcherTextureSizes(
+            glsl, "// banjo-dk ubo=0x6 ssbo=0x0 tex=0 texb=0:0:384,1:4:388,2:20:404,3:136:392,4:136:392,"
+                  "5:140:396,6:140:396,7:4:65535,8:136:65535,9:140:65535",
+            {{7, 2, 3}, {8, 3, 8}, {9, 3, 8}});
+        break;
+      case 0x9AA5D944C3122354ull:
+        texture_sizes = ApplyWitcherTextureSizes(
+            glsl, "// banjo-dk ubo=0x6 ssbo=0x0 tex=0 texb=0:0:384,1:8:392,2:12:396,3:4:388,4:4:65535,5:12:65535",
+            {{4, 2, 4}, {5, 2, 3}});
+        break;
+      case 0x33382DC426620804ull:
+      case 0x7BF017D4962F5915ull:
+        texture_sizes = ApplyWitcherTextureSizes(
+            glsl, "// banjo-dk ubo=0x6 ssbo=0x0 tex=0 texb=0:0:384,1:0:65535",
+            {{1, 2, hash == 0x33382DC426620804ull ? 4u : 1u}});
+        break;
+      case 0xBEA67AEE6795A005ull:
+        if (ApplyWitcherAmbientShadowBranch(glsl))
+          REXLOG_INFO("[deko3d] Combined ambient shadow branches for shader {:016X}", hash);
+        break;
+    }
+    const bool fragment_tests = ApplyWitcherFragmentTests(glsl);
+    if (texture_sizes)
+      REXLOG_INFO("[deko3d] Texture size buffer for shader {:016X} (mode {})", hash, TxqMode());
+    if (fragment_tests)
+      REXLOG_INFO("[deko3d] Fragment test variants for shader {:016X}", hash);
+    if (glsl.size() != e->size) {
       header.glslSize = uint32_t(glsl.size());
       blob.resize(sizeof(header) + glsl.size());
       std::memcpy(blob.data(), &header, sizeof(header));
       std::memcpy(blob.data() + sizeof(header), glsl.data(), glsl.size());
-      REXLOG_INFO("[deko3d] Restored guest texture fetch exponent adjustments in FXAA");
-    } else {
-      REXLOG_WARN("[deko3d] Unrecognized FXAA GLSL layout for texture fetch exponent adjustments");
     }
   }
   auto shader = device->createShader(blob.data(), blob.size(), "main", plume::RenderShaderFormat::DEKO3D);

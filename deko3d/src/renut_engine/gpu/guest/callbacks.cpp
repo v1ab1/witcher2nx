@@ -58,7 +58,7 @@ void InsertCallback(u32 function, u32 context) {
   // command list is submitted: after the callback the game may rewrite them
   // (the XMV player's frames).
   // banjo-nx (package 27c): the vertex fills too, for the same reason.
-  banjo::renut_gpu::checks::QueueKickFlush();
+  banjo::renut_gpu::checks::QueueKickFlush(banjo::renut_gpu::checks::KickOrigin::Callback);
   render_thread::QueueCallbackMarker(seq);
 }
 
