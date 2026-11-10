@@ -637,9 +637,10 @@ uint64_t QueueFrame(std::function<void()> work) {
     const Clock::duration so_far = Clock::now() - g_item_start;
     const double busy_ms =
         std::chrono::duration<double, std::milli>(g_busy + so_far - g_waited).count();
+    const double wait_ms = std::chrono::duration<double, std::milli>(g_waited).count();
     g_busy = -so_far;
     g_waited = {};
-    frame_stats::OnRenderThreadFrame(busy_ms);
+    frame_stats::OnRenderThreadFrame(busy_ms, wait_ms);
     bool wake;
     {
       std::lock_guard lock(g_mutex);
@@ -660,7 +661,8 @@ uint64_t QueueFrame(std::function<void()> work) {
   const uint64_t done = g_frames_done;
   lock.unlock();
   const auto waited = std::chrono::steady_clock::now() - waiting;
-  frame_stats::OnGameThreadWait(std::chrono::duration<double, std::milli>(waited).count());
+  frame_stats::OnGameThreadWait(frame_stats::GameWait::SwapQueue,
+                               std::chrono::duration<double, std::milli>(waited).count());
   // banjo-nx (2026-10-19, banjo_late_input): this frame's slack (the game thread only: one Swap at a time).
   {
     // The game's frame interval (the game thread only), averaged over about 16 frames.

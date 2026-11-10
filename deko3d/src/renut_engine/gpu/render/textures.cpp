@@ -656,6 +656,7 @@ void Retire(HostTexture &t) {
     Video::RetireLocked(std::move(v));
   t.level_target_views.clear();
   Video::RetireLocked(std::move(t.copy_framebuffer));  // banjo-nx (2026-10-18)
+  Video::RetireLocked(std::move(t.packed_depth_framebuffer));
   Video::RetireLocked(std::move(t.view));
   Video::RetireLocked(std::move(t.texture));
   if (t.words) {

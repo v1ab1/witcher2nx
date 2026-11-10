@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 // Frame statistics for the FPS overlay. A game frame is one D3DDevice_Swap:
 // the frames the game actually finishes, whatever its update loop does.
 
@@ -33,14 +34,21 @@ void OnGameFrame();
 
 // Called by the renderer when a frame's GPU time is known (a frame or two
 // after it was submitted).
-void OnGpuFrame(double ms);
+void OnGpuFrame(double ms, std::optional<double> list_gap_ms, std::optional<double> frame_gap_ms);
 
 // Called by the render thread at the end of each frame's work.
-void OnRenderThreadFrame(double busy_ms);
+void OnRenderThreadFrame(double busy_ms, double wait_ms);
 
 // Called by the renderer when the game thread has waited for the render
 // thread (Swap's frame pacing, fence waits), for the CPU time to leave out.
-void OnGameThreadWait(double ms);
+enum class GameWait { SwapQueue, Fence };
+void OnGameThreadWait(GameWait kind, double ms);
+
+struct GameWaitTimes {
+  double swap_queue_ms = 0.0;
+  double fence_ms = 0.0;
+};
+GameWaitTimes TakeGameWaitTimes();
 
 Snapshot Get();
 

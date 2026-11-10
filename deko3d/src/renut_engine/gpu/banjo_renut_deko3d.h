@@ -16,6 +16,49 @@ namespace banjo::renut_gpu::deko3d {
 
 inline constexpr uint64_t kWitcherFxaaShader = 0x14830D3955814FE1ull;
 
+// Hot Witcher 2 shaders with a pure fragment body and the translated alpha test.
+inline constexpr bool WitcherFragmentTuned(uint64_t hash) {
+  switch (hash) {
+    case kWitcherFxaaShader:
+    case 0x021842DF8E73954Bull:
+    case 0x126E21EED5144FEDull:
+    case 0x12C480E60BC2B70Aull:
+    case 0x172BEBF5479701AAull:
+    case 0x1751BCB20327F0C0ull:
+    case 0x1CE03F6D8891FBEEull:
+    case 0x22DFD94B0F97BCDCull:
+    case 0x29F6B9DC6D9C4061ull:
+    case 0x2E44476CC5DC0CDCull:
+    case 0x33382DC426620804ull:
+    case 0x4C88446E985D5FE3ull:
+    case 0x52048EE1B75BD711ull:
+    case 0x55F0787D5079D2DEull:
+    case 0x5700EDCFD7E0B634ull:
+    case 0x5C2994A3FF80461Full:
+    case 0x5F549466E8736C3Cull:
+    case 0x5FCF0FEF678E0110ull:
+    case 0x6EC8AD2DA942579Bull:
+    case 0x752F459B16B77DAAull:
+    case 0x755F83E354ABE2CDull:
+    case 0x7B5F80AA19D1E36Cull:
+    case 0x7BF017D4962F5915ull:
+    case 0x8A85534A20512E9Eull:
+    case 0x9AA5D944C3122354ull:
+    case 0x9D074374F6638A2Aull:
+    case 0xBCB105034A862A29ull:
+    case 0xBEA67AEE6795A005ull:
+    case 0xC922452654A99DCAull:
+    case 0xE144217D0E28B058ull:
+    case 0xE8EB382BEA488A47ull:
+    case 0xEAB50831B93FF2CEull:
+    case 0xF35919B52DA699F5ull:
+    case 0xF8EED87302AB7BEEull:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Whether the NRO carries the GLSL package (Switch builds made with one).
 bool PackageAvailable();
 

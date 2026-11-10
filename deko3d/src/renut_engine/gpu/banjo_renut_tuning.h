@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #include <xxhash.h>
@@ -346,8 +347,8 @@ void BeforeDeviceDestroyed();
 // "[renut A/B]" line. Targets: 1 precise barriers, 2 the render thread's pin to banjo_ring_core (the Switch),
 // 3 SharedConstants reuse, 4 the push constant skip, 5 the capture pool, 6 banjo_renut_exact_streams (its cost).
 void StatsGameFrame();                     // a D3DDevice_Swap (game thread)
-void StatsRenderThreadFrame(double busy_ms);  // the render thread's frame (render thread)
-void StatsGpuFrame(double ms);             // a frame's GPU time
+void StatsRenderThreadFrame(double busy_ms, double wait_ms);  // the render thread's frame (render thread)
+void StatsGpuFrame(double ms, std::optional<double> list_gap_ms, std::optional<double> frame_gap_ms);
 
 // banjo_renut_pmull_hash: chosen once, before the renderer's first draw (BeforeDeviceCreated), after a self-test.
 extern bool g_pmull_hash;

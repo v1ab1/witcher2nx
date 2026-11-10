@@ -9,6 +9,8 @@ namespace banjo::renut_gpu::checks {
 
 // Game threads: a kick (KickDevice, the Swap's, a callback) for the render thread: the interval's vertex and texture
 // fills are read there, before the fence or callback that lets the game rewrite them completes.
-void QueueKickFlush();
+enum class KickOrigin { Device, Callback, Swap };
+bool KickPathTraceOn();
+void QueueKickFlush(KickOrigin origin);
 
 }  // namespace banjo::renut_gpu::checks

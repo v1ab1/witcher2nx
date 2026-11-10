@@ -50,6 +50,7 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_variant_log, false, "Banjo/Renut",
 #endif
 
 #include "renut_engine/gpu/backend/backend.h"
+#include "renut_engine/gpu/banjo_renut_deko3d.h"
 #include "renut_engine/gpu/render/format.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/guest/resources.h"
@@ -582,7 +583,8 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
     job.key.blend_skip = 0;
   if (!banjo::renut_gpu::OutputTrimOn())
     job.key.output_trim = 0;
-  if (!banjo::renut_gpu::AlphaSpecOn())
+  if (!banjo::renut_gpu::AlphaSpecOn() &&
+      !(IsDeko3D() && job.key.alpha_func == 8 && ps && banjo::renut_gpu::deko3d::WitcherFragmentTuned(ps_hash)))
     job.key.alpha_func = 0;
   if (!banjo::renut_gpu::BoolSpecOn()) {
     std::memset(job.key.bool_mask, 0, sizeof(job.key.bool_mask));

@@ -3151,7 +3151,8 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
   }
   // banjo-nx (banjo_deko3d_alpha_spec, 2026-10-18): the alpha test's function as the pixel shader's constant 903 (+1):
   // without the test (7) no compare and no discard, and the GPU tests depth before the pixel shader.
-  if (ps && banjo::renut_gpu::AlphaSpecOn())
+  if (ps && (banjo::renut_gpu::AlphaSpecOn() ||
+             (IsDeko3D() && alpha_test_func == 7 && banjo::renut_gpu::deko3d::WitcherFragmentTuned(ps->hash))))
     key.alpha_func = alpha_test_func + 1;
   // banjo-nx (2026-10-20, in-run A/B targets 15 / 16): in the off half of banjo_deko3d_light_branch's or
   // banjo_deko3d_gpr32's A/B the pipelines are built without its constant (911 / 910): keys of their own (reserved
@@ -5042,15 +5043,34 @@ namespace {
 // through the 8-bit view of that EDRAM, then adds the glow particles through a
 // 16-bit float view; the float target kept the frames before, and the glow
 // piled up into drips.
-void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, const float color[4],
+void ClearTargets(const Targets &targets, u32 flags, const plume::RenderRect &rect, const float color[4],
                   float depth, u32 stencil) {
   if (banjo::renut_gpu::ResolveTraceOn()) {
     RGPU_INFO("[trace] clear {:X} rect ({},{})-({},{}) of {}x{}, colour {} {} {} {}, depth {}, stencil {}", flags,
-              rect.left, rect.top, rect.right, rect.bottom, t.width, t.height, color[0], color[1], color[2], color[3],
+              rect.left, rect.top, rect.right, rect.bottom, targets.width, targets.height,
+              color[0], color[1], color[2], color[3],
               depth, stencil);  // sa2-nx (2026-10-28): the values too
   }
   if (rect.right <= rect.left || rect.bottom <= rect.top)
     return;
+  Targets t = targets;
+  if (IsDeko3D()) {
+    // Binding an untouched attachment can materialise its pending resolve.
+    // Keep the guest's clear rectangle and remap the mask to the attachments that are actually cleared.
+    t.color_count = 0;
+    u32 active_flags = flags & ~0xFu;
+    for (uint32_t i = 0; i < targets.color_count; ++i) {
+      if (flags & (1u << i)) {
+        active_flags |= 1u << t.color_count;
+        t.colors[t.color_count++] = targets.colors[i];
+      }
+    }
+    if (!(flags & 0x30))
+      t.depth = nullptr;
+    if (!t.color_count && !t.depth)
+      return;
+    flags = active_flags;
+  }
   // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): before the target is bound for the clear.
   if (t.depth && t.depth->handed)
     DepthHandOverBeforeBindLocked(t.depth, &rect, flags);
@@ -5098,7 +5118,8 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
     ColorAliasesLocked(t.colors[i], found);
     for (HostSurface *alias : found) {
       if (std::find(aliases.begin(), aliases.end(), alias) == aliases.end() &&
-          std::find(t.colors, t.colors + t.color_count, alias) == t.colors + t.color_count)
+          std::find(targets.colors, targets.colors + targets.color_count, alias) ==
+              targets.colors + targets.color_count)
         aliases.push_back(alias);
     }
   }
@@ -5151,6 +5172,14 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
   }
 }
 
+plume::RenderFramebuffer *CopyFramebufferLocked(HostTexture &dest) {
+  if (!dest.copy_framebuffer) {
+    const plume::RenderTexture *targets[] = {dest.texture.get()};
+    dest.copy_framebuffer = State().device->createFramebuffer(plume::RenderFramebufferDesc(targets, 1));
+  }
+  return dest.copy_framebuffer.get();
+}
+
 // Depth resolve (shaders/host/depth_resolve.hlsli): 'src' of the depth target
 // to ('dest_x', 'dest_y') of the destination and of its guest words, in guest
 // pixels (the destination is of the surface's scale).
@@ -5160,19 +5189,34 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
   auto &s = State();
   const uint32_t variant = surface->samples != plume::RenderSampleCount::COUNT_1 ? 1 : 0;
   const uint32_t source_slot = SurfaceSampleSlotLocked(surface);
-  if (!s.depth_resolve_float_pipeline[variant])
-    words = true;  // banjo-nx (banjo_renut_depth_words_lazy): no depth-only pipeline
   if (source_slot == kInvalidDescriptor || !dest->depth_framebuffer ||
       !s.depth_resolve_pipeline[variant]) {
     return false;
   }
+  auto *framebuffer = dest->depth_framebuffer.get();
+  bool single_target = false;
+  if (!words && variant == 0 && s.depth_resolve_single_target_pipeline) {
+    if (auto *copy = CopyFramebufferLocked(*dest)) {
+      framebuffer = copy;
+      single_target = true;
+      static bool logged = false;
+      if (!logged) {
+        RGPU_INFO("[renut] Single-target depth resolve active");
+        logged = true;
+      }
+    }
+  }
+  if (!single_target && !s.depth_resolve_float_pipeline[variant])
+    words = true;  // banjo-nx (banjo_renut_depth_words_lazy): no depth-only pipeline
   plume::RenderCommandList *cmd = s.command_list;
   static const uint32_t kProfileLabel = gpu_profile::Label("depth resolves");
-  gpu_profile::Mark(s, kProfileLabel);
+  static const uint32_t kProfileLabelSingle = gpu_profile::Label("depth resolves (single target)");
+  gpu_profile::Mark(s, single_target ? kProfileLabelSingle : kProfileLabel);
   TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
   TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
-  TransitionTextureLocked(dest->words.get(), plume::RenderTextureLayout::COLOR_WRITE);
-  cmd->setFramebuffer(dest->depth_framebuffer.get());
+  if (!single_target)
+    TransitionTextureLocked(dest->words.get(), plume::RenderTextureLayout::COLOR_WRITE);
+  cmd->setFramebuffer(framebuffer);
   // Pixel coordinates are destination texels.
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width),
                                           float(dest->alloc_height)));
@@ -5180,10 +5224,12 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
                                                dest_y + (src.y2 - src.y1)),
                              surface->scale));
   cmd->setGraphicsPipelineLayout(s.utility_layout.get());
-  cmd->setPipeline(words ? s.depth_resolve_pipeline[variant].get() : s.depth_resolve_float_pipeline[variant].get());
+  auto *pipeline = words ? s.depth_resolve_pipeline[variant].get() : s.depth_resolve_float_pipeline[variant].get();
+  cmd->setPipeline(single_target ? s.depth_resolve_single_target_pipeline.get() : pipeline);
   cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
   cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
-  cmd->setGraphicsDescriptorSet(s.texture_set.get(), 2);  // banjo-nx: the stencil view, read as uint
+  if (!single_target)
+    cmd->setGraphicsDescriptorSet(s.texture_set.get(), 2);  // banjo-nx: the stencil view, read as uint
   UtilityPush push{};
   push.scale[0] = push.scale[1] = 1.0f;
   push.translate[0] = float(scale.Coord(src.x1) - scale.Coord(dest_x));
@@ -5413,16 +5459,13 @@ bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::Rende
       return false;
     pipeline->setName("renut resolve copy");
   }
-  if (!dest->copy_framebuffer) {
-    const plume::RenderTexture *targets[] = {dest->texture.get()};
-    dest->copy_framebuffer = s.device->createFramebuffer(plume::RenderFramebufferDesc(targets, 1));
-    if (!dest->copy_framebuffer)
-      return false;
-  }
+  auto *framebuffer = CopyFramebufferLocked(*dest);
+  if (!framebuffer)
+    return false;
   plume::RenderCommandList *cmd = s.command_list;
   TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
   TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
-  cmd->setFramebuffer(dest->copy_framebuffer.get());
+  cmd->setFramebuffer(framebuffer);
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width), float(dest->alloc_height)));
   cmd->setScissors(plume::RenderRect(int32_t(host_x), int32_t(host_y), int32_t(host_x) + (rect.right - rect.left),
                                      int32_t(host_y) + (rect.bottom - rect.top)));
@@ -5927,47 +5970,65 @@ static uint64_t ResolveSignature(const HostSurface *surface, const ClearRect &sr
   return h ? h : 1;
 }
 
-static void ImportPackedParticleDepth(const GuestDevice &device, HostSurface *depth) {
+static bool ImportPackedParticleDepth(const GuestDevice &device, HostSurface *depth,
+                                      HostTexture *full_float_resolve) {
   auto &s = State();
   if (!s.packed_particle_depth_pipeline || depth->format != plume::RenderFormat::D32_FLOAT_S8_UINT ||
       (depth->format_word & 0x3F) != u32(GpuTextureFormat::Fmt24_8_Float) ||
       depth->samples != plume::RenderSampleCount::COUNT_1 || depth->width % 80)
-    return;
+    return false;
 
   const auto *ps = FindShaderLocked(device.U32(d3d::kDeviceOffsetPixelShader), RecordKind::PixelShader);
   if (!ps || ps->hash != 0x7BF017D4962F5915ull)
-    return;
+    return false;
   const u32 color_va = device.U32(d3d::kDeviceOffsetRenderTargets);
   if (!color_va)
-    return;
+    return false;
   const auto *color_desc = GuestPtr<const d3d::SurfaceDesc>(color_va + sizeof(d3d::Resource));
   const auto *depth_desc = GuestPtr<const d3d::SurfaceDesc>(
       device.U32(d3d::kDeviceOffsetDepthStencil) + sizeof(d3d::Resource));
   if (!color_desc || !depth_desc || color_desc->Size != depth_desc->Size ||
       color_desc->SurfaceInfo != depth_desc->SurfaceInfo ||
       (u32(color_desc->ColorInfo) & 0xFFF) != (u32(depth_desc->ColorInfo) & 0xFFF))
-    return;
+    return false;
   auto *color = GetHostSurfaceLocked(color_va);
   if (!color || color->format != plume::RenderFormat::R8G8B8A8_UNORM ||
       color->scale != depth->scale || color->width != depth->width || color->height != depth->height)
-    return;
+    return false;
   const u32 slot = SurfaceSampleSlotLocked(color);
   if (slot == kInvalidDescriptor)
-    return;
+    return false;
 
   DepthHandOverBeforeBindLocked(depth, nullptr, 0);
-  auto *framebuffer = GetFramebufferLocked(nullptr, 0, depth);
+  plume::RenderFramebuffer *framebuffer = nullptr;
+  auto *dest = full_float_resolve;
+  if (s.packed_particle_depth_resolve_pipeline && dest && !dest->handed_from && !dest->held_current) {
+    if (dest->packed_depth_generation != depth->generation) {
+      Video::RetireLocked(std::move(dest->packed_depth_framebuffer));
+      const plume::RenderTexture *targets[] = {dest->texture.get()};
+      dest->packed_depth_framebuffer = s.device->createFramebuffer(
+          plume::RenderFramebufferDesc(targets, 1, depth->texture.get()));
+      if (dest->packed_depth_framebuffer)
+        dest->packed_depth_generation = depth->generation;
+    }
+    framebuffer = dest->packed_depth_framebuffer.get();
+  }
+  const bool fused = framebuffer != nullptr;
+  if (!fused)
+    framebuffer = GetFramebufferLocked(nullptr, 0, depth);
   if (!framebuffer)
-    return;
+    return false;
   TransitionSurfaceLocked(color, plume::RenderTextureLayout::SHADER_READ);
   TransitionSurfaceLocked(depth, plume::RenderTextureLayout::DEPTH_WRITE);
+  if (fused)
+    TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
   const u32 width = depth->scale.Size(depth->width), height = depth->scale.Size(depth->height);
   auto *cmd = s.command_list;
   cmd->setFramebuffer(framebuffer);
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(width), float(height)));
   cmd->setScissors(plume::RenderRect(0, 0, width, height));
   cmd->setGraphicsPipelineLayout(s.utility_layout.get());
-  cmd->setPipeline(s.packed_particle_depth_pipeline.get());
+  cmd->setPipeline(fused ? s.packed_particle_depth_resolve_pipeline.get() : s.packed_particle_depth_pipeline.get());
   cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
   cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
   UtilityPush push{};
@@ -5976,6 +6037,14 @@ static void ImportPackedParticleDepth(const GuestDevice &device, HostSurface *de
   push.param0 = 40.0f * depth->scale.Factor();
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
+  if (fused) {
+    TransitionTextureLocked(dest, plume::RenderTextureLayout::SHADER_READ);
+    static bool logged_fused = false;
+    if (!logged_fused) {
+      RGPU_INFO("[renut] Packed particle depth and float resolve fused at {}x{}", width, height);
+      logged_fused = true;
+    }
+  }
   // The matching pass only tests and samples depth; it does not use stencil.
   ++depth->writes;
   g_bound.framebuffer = nullptr;
@@ -5987,6 +6056,7 @@ static void ImportPackedParticleDepth(const GuestDevice &device, HostSurface *de
     RGPU_INFO("Imported packed particle depth from the {}x{} EDRAM color view", depth->width, depth->height);
     logged = true;
   }
+  return fused;
 }
 
 void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *source_rect,
@@ -6058,16 +6128,20 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
                     dest_level, dest_slice);
         }
       } else if (fit(dest, src)) {
-        ImportPackedParticleDepth(device, surface);
-        // banjo-nx (2026-10-19, banjo_renut_resolve_skip): the same resolve of an unchanged source is in dest already.
-        const uint64_t sig = ResolveSignature(surface, src, dest_x, dest_y, dest_level, dest_slice);
         // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): the words only where something reads them (or while
         // probing a new destination).
         const bool lazy = banjo::renut_gpu::DepthWordsLazyOn();
         const bool words = !lazy || dest->words_wanted || dest->words_probe < kDepthWordsProbe;
-        if (banjo::renut_gpu::ResolveSkipOn() && dest->resolve_signature == sig) {
+        const bool full_float = !words && src.x1 == 0 && src.y1 == 0 && dest_x == 0 && dest_y == 0 &&
+                                src.x2 == int32_t(surface->width) && src.y2 == int32_t(surface->height) &&
+                                dest->width == surface->width && dest->height == surface->height;
+        // The matching packed pass can write both images from the same decoded value, without sampling depth again.
+        const bool fused = ImportPackedParticleDepth(device, surface, full_float ? dest : nullptr);
+        // banjo-nx (2026-10-19, banjo_renut_resolve_skip): the same resolve of an unchanged source is in dest already.
+        const uint64_t sig = ResolveSignature(surface, src, dest_x, dest_y, dest_level, dest_slice);
+        if (!fused && banjo::renut_gpu::ResolveSkipOn() && dest->resolve_signature == sig) {
           banjo::renut_gpu::CountSkippedResolve(true);
-        } else if (HandOverResolveLocked(surface, dest, src, dest_x, dest_y, words) ||
+        } else if (fused || HandOverResolveLocked(surface, dest, src, dest_x, dest_y, words) ||
                    ResolveDepth(surface, dest, src, dest_x, dest_y, words)) {
           dest->resolve_signature = sig;
           dest->words_current = words;

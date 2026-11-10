@@ -24,6 +24,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -450,7 +451,7 @@ class PosixConditionBase {
   // `wake` (optional): wake point registered by the caller (and, for alertable calls, with its thread). With
   // it the call parks instead of sleeping 1 ms between polls: it re-polls when a registered handle is
   // signalled (poke), when `interrupt` is raised, at the end of the timeout, or after the safety interval.
-  static std::pair<WaitResult, size_t> WaitMultiple(std::vector<PosixConditionBase*>&& handles,
+  static std::pair<WaitResult, size_t> WaitMultiple(std::span<PosixConditionBase* const> handles,
                                                     bool wait_all,
                                                     std::chrono::milliseconds timeout,
                                                     WakePoint* wake = nullptr,
@@ -469,9 +470,9 @@ class PosixConditionBase {
 
     // Registered for the whole call; the guard unregisters on every exit path.
     struct MultiRegistration {
-      std::vector<PosixConditionBase*>& handles;
+      std::span<PosixConditionBase* const> handles;
       WakePoint* wake;
-      MultiRegistration(std::vector<PosixConditionBase*>& h, WakePoint* w) : handles(h), wake(w) {
+      MultiRegistration(std::span<PosixConditionBase* const> h, WakePoint* w) : handles(h), wake(w) {
         if (wake) {
           for (auto* handle : handles) handle->RegisterMulti(wake);
         }
@@ -484,9 +485,19 @@ class PosixConditionBase {
     } registration(handles, wake);
     const auto safety = std::chrono::milliseconds(std::max(1, REXCVAR_GET(thread_multiwait_safety_ms)));
 
-    // Reuse the allocation between polls; clear() releases the locks, not the memory.
-    std::vector<std::unique_lock<std::mutex>> locks;
-    locks.reserve(handles.size());
+    std::array<std::unique_lock<std::mutex>, 8> local_locks;
+    std::vector<std::unique_lock<std::mutex>> heap_locks;
+    if (handles.size() > local_locks.size()) {
+      heap_locks.resize(handles.size());
+    }
+    std::span locks(heap_locks.empty() ? local_locks.data() : heap_locks.data(), handles.size());
+    auto release_locks = [&locks] {
+      for (auto& lock : locks) {
+        if (lock.owns_lock()) {
+          lock.unlock();
+        }
+      }
+    };
     while (true) {
       // Sampled BEFORE the poll: a handle signalled after this point bumps the sequence, so the park
       // below returns at once instead of missing it.
@@ -503,14 +514,14 @@ class PosixConditionBase {
           if (result == EOWNERDEAD) {
             pthread_mutex_consistent(native_mutex);
           }
-          locks.emplace_back(handles[i]->mutex_, std::adopt_lock);
+          locks[i] = std::unique_lock(handles[i]->mutex_, std::adopt_lock);
         } else {
           all_locked = false;
           break;
         }
 #else
-        locks.emplace_back(handles[i]->mutex_, std::try_to_lock);
-        if (!locks.back().owns_lock()) {
+        locks[i] = std::unique_lock(handles[i]->mutex_, std::try_to_lock);
+        if (!locks[i].owns_lock()) {
           all_locked = false;
           break;
         }
@@ -518,7 +529,7 @@ class PosixConditionBase {
       }
 
       if (!all_locked) {
-        locks.clear();
+        release_locks();
         // The timeout also expires when an object cannot be inspected.
         // The earlier continue skipped the only timeout check.
         const auto now = std::chrono::steady_clock::now();
@@ -574,7 +585,7 @@ class PosixConditionBase {
         return std::make_pair(WaitResult::kSuccess, first_signaled);
       }
 
-      locks.clear();
+      release_locks();
 
       auto now = std::chrono::steady_clock::now();
       if (now >= end_time) {
@@ -1931,21 +1942,26 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
 std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wait_handle_count,
                                            bool wait_all, bool is_alertable,
                                            std::chrono::milliseconds timeout) {
-  std::vector<PosixConditionBase*> conditions;
-  conditions.reserve(wait_handle_count);
+  std::array<PosixConditionBase*, 8> local_conditions;
+  std::vector<PosixConditionBase*> heap_conditions;
+  if (wait_handle_count > local_conditions.size()) {
+    heap_conditions.resize(wait_handle_count);
+  }
+  std::span conditions(heap_conditions.empty() ? local_conditions.data() : heap_conditions.data(),
+                       wait_handle_count);
   for (size_t i = 0u; i < wait_handle_count; ++i) {
     auto handle = dynamic_cast<PosixWaitHandle*>(wait_handles[i]);
     if (handle == nullptr) {
       return std::make_pair(WaitResult::kFailed, 0);
     }
-    conditions.push_back(&handle->condition());
+    conditions[i] = &handle->condition();
   }
   // Parked (event-driven) waits need a wake point; legacy mode keeps the 1 ms polling.
   const bool blocking = REXCVAR_GET(thread_wait_blocking);
   WakePoint wake_point;
   WakePoint* wake = blocking && conditions.size() > 1 ? &wake_point : nullptr;
   if (!is_alertable) {
-    return PosixConditionBase::WaitMultiple(std::move(conditions), wait_all, timeout, wake, nullptr);
+    return PosixConditionBase::WaitMultiple(conditions, wait_all, timeout, wake, nullptr);
   }
 
   ScopedAlertableState alertable_state_guard(true);
@@ -1957,8 +1973,7 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
     if (DispatchCurrentThreadUserCallback()) {
       return std::make_pair(WaitResult::kUserCallback, 0);
     }
-    auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
-                                                   wait_all, ComputeAlertableWaitTimeout(deadline),
+    auto result = PosixConditionBase::WaitMultiple(conditions, wait_all, ComputeAlertableWaitTimeout(deadline),
                                                    wake, interrupt);
     if (result.first != WaitResult::kTimeout) {
       return result;

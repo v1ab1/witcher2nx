@@ -36,6 +36,7 @@
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/backend/video_internal.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/banjo_renut_checks.h"
 #include "renut_engine/gpu/banjo_renut_record.h"  // banjo-nx (package 28b): banjo_renut_record_worker
 #include <rex/frame_latency.h>  // banjo-nx (2026-10-20): the latency probe's "input -> GPU done"
 #include <rex/cvar.h>  // sa2-nx (2026-10-20): sa2_renut_double_buffer
@@ -289,8 +290,7 @@ void BuildPackedParticleDepthPipeline(VideoState &s) {
 #if defined(PLUME_DEKO3D)
   if (!IsDeko3D())
     return;
-  constexpr char source[] = R"glsl(#version 460
-// banjo-dk ubo=0x20 ssbo=0x0 tex=1
+  constexpr char source[] = R"glsl(
 #extension GL_ARB_bindless_texture : require
 layout(std140, binding = 5) uniform UtilityPush {
     vec2 scale;
@@ -300,6 +300,9 @@ layout(std140, binding = 5) uniform UtilityPush {
     float halfTileWidth;
     float unused;
 } pushData;
+#ifdef WRITE_RESOLVE
+layout(location = 0) out float resolvedDepth;
+#endif
 void main() {
     vec2 pixel = gl_FragCoord.xy;
     float halfTile = pushData.halfTileWidth;
@@ -311,33 +314,54 @@ void main() {
     uint depth = bytes.x | (bytes.y << 8) | (bytes.z << 16);
     uint exponent = depth >> 20;
     uint mantissa = depth & 0xfffffu;
-    gl_FragDepth = exponent == 0u ? float(mantissa) * 5.820766091346741e-11
+    float value = exponent == 0u ? float(mantissa) * 5.820766091346741e-11
                                  : uintBitsToFloat(((exponent + 112u) << 23) | (mantissa << 3));
+    gl_FragDepth = value;
+#ifdef WRITE_RESOLVE
+    resolvedDepth = clamp(value, 0.0, 1.0);
+#endif
 }
 )glsl";
-  const plume::Deko3DShaderBlob header{plume::Deko3DShaderBlob::Magic, DkStage_Fragment,
-                                     sizeof(source) - 1, 0};
-  uint8_t blob[sizeof(header) + sizeof(source) - 1];
-  std::memcpy(blob, &header, sizeof(header));
-  std::memcpy(blob + sizeof(header), source, sizeof(source) - 1);
-  auto shader = CreateHostShader(s.device.get(), {.deko3d = blob, .deko3d_size = sizeof(blob)},
-                                 "packed_particle_depth_ps");
-  if (!shader)
-    return;
 
-  plume::RenderGraphicsPipelineDesc desc;
-  desc.pipelineLayout = s.utility_layout.get();
-  desc.vertexShader = s.present_vs.get();
-  desc.pixelShader = shader.get();
-  desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
-  desc.cullMode = plume::RenderCullMode::NONE;
-  desc.depthTargetFormat = plume::RenderFormat::D32_FLOAT_S8_UINT;
-  desc.depthEnabled = true;
-  desc.depthWriteEnabled = true;
-  desc.depthFunction = plume::RenderComparisonFunction::ALWAYS;
-  auto pipeline = s.device->createGraphicsPipeline(desc);
-  if (GraphicsPipelineCreated(pipeline.get()))
-    s.packed_particle_depth_pipeline = std::move(pipeline);
+  auto build = [&](bool resolve) -> std::unique_ptr<plume::RenderPipeline> {
+    std::string glsl = "#version 460\n// banjo-dk ubo=0x20 ssbo=0x0 tex=1\n";
+    if (resolve)
+      glsl += "#define WRITE_RESOLVE\n";
+    glsl += source;
+    const plume::Deko3DShaderBlob header{plume::Deko3DShaderBlob::Magic, DkStage_Fragment,
+                                       uint32_t(glsl.size()), 0};
+    std::vector<uint8_t> blob(sizeof(header) + glsl.size());
+    std::memcpy(blob.data(), &header, sizeof(header));
+    std::memcpy(blob.data() + sizeof(header), glsl.data(), glsl.size());
+    auto shader = CreateHostShader(s.device.get(), {.deko3d = blob.data(), .deko3d_size = blob.size()},
+                                  resolve ? "packed_particle_depth_resolve_ps" : "packed_particle_depth_ps");
+    if (!shader)
+      return nullptr;
+
+    plume::RenderGraphicsPipelineDesc desc;
+    desc.pipelineLayout = s.utility_layout.get();
+    desc.vertexShader = s.present_vs.get();
+    desc.pixelShader = shader.get();
+    desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+    desc.cullMode = plume::RenderCullMode::NONE;
+    desc.depthTargetFormat = plume::RenderFormat::D32_FLOAT_S8_UINT;
+    desc.depthEnabled = true;
+    desc.depthWriteEnabled = true;
+    desc.depthFunction = plume::RenderComparisonFunction::ALWAYS;
+    if (resolve) {
+      desc.renderTargetCount = 1;
+      desc.renderTargetFormat[0] = kDepthResolveFormat;
+      desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
+    }
+    auto pipeline = s.device->createGraphicsPipeline(desc);
+    if (!GraphicsPipelineCreated(pipeline.get()))
+      return nullptr;
+    return pipeline;
+  };
+
+  s.packed_particle_depth_pipeline = build(false);
+  if (s.packed_particle_depth_pipeline)
+    s.packed_particle_depth_resolve_pipeline = build(true);
 #endif
 }
 
@@ -376,6 +400,17 @@ bool BuildDepthResolvePipelines(VideoState &s) {
     if (s.depth_resolve_float_pipeline[i])
       s.depth_resolve_float_pipeline[i]->setName(i ? "renut depth resolve, depth only (msaa)"
                                                    : "renut depth resolve, depth only");
+    // The single-sample resolve's first output is the same texel load as
+    // resolve_copy_ps. With only R32F bound, there is no guest word to encode.
+    if (i == 0 && IsDeko3D() && s.resolve_copy_ps) {
+      desc.pixelShader = s.resolve_copy_ps.get();
+      desc.renderTargetCount = 1;
+      auto pipeline = s.device->createGraphicsPipeline(desc);
+      if (GraphicsPipelineCreated(pipeline.get())) {
+        pipeline->setName("renut depth resolve, single target");
+        s.depth_resolve_single_target_pipeline = std::move(pipeline);
+      }
+    }
   }
   BuildPackedParticleDepthPipeline(s);
   return true;
@@ -662,17 +697,38 @@ namespace {
 void CollectGpuTime(VideoState &s, uint32_t slot) {
   const uint32_t lists = s.timed_lists[slot];
   s.timed_lists[slot] = 0;
+  bool complete = s.timed_frame_complete[slot];
+  s.timed_frame_complete[slot] = false;
   plume::RenderQueryPool *pool = s.timestamps[slot].get();
-  if (!pool || !lists)
+  if (!pool || !lists) {
+    s.previous_gpu_end = 0;
     return;
+  }
   pool->queryResults();
   const uint64_t *ns = pool->getResults();
   uint64_t total = 0;
+  uint64_t list_gaps = 0;
   for (uint32_t i = 0; i < lists; ++i) {
-    if (ns[2 * i + 1] > ns[2 * i])
-      total += ns[2 * i + 1] - ns[2 * i];
+    const uint64_t start = ns[2 * i], end = ns[2 * i + 1];
+    if (end > start)
+      total += end - start;
+    else
+      complete = false;
+    if (i && start >= ns[2 * i - 1])
+      list_gaps += start - ns[2 * i - 1];
+    else if (i)
+      complete = false;
   }
-  frame_stats::OnGpuFrame(double(total) / 1e6);
+  std::optional<double> list_gap_ms, frame_gap_ms;
+  if (complete) {
+    list_gap_ms = double(list_gaps) / 1e6;
+    if (s.previous_gpu_end && ns[0] >= s.previous_gpu_end)
+      frame_gap_ms = double(ns[0] - s.previous_gpu_end) / 1e6;
+    s.previous_gpu_end = ns[2 * lists - 1];
+  } else {
+    s.previous_gpu_end = 0;
+  }
+  frame_stats::OnGpuFrame(double(total) / 1e6, list_gap_ms, frame_gap_ms);
 }
 
 } // namespace
@@ -694,6 +750,8 @@ void BeginListTiming(VideoState &s) {
 
 void EndListTiming(VideoState &s, bool last_in_frame) {
   gpu_profile::EndList(s, last_in_frame);
+  if (last_in_frame)
+    s.timed_frame_complete[s.frame] = s.timing_open;
   plume::RenderQueryPool *pool = s.timestamps[s.frame].get();
   if (!pool || !s.timing_open)
     return;
@@ -1087,6 +1145,8 @@ bool Video::EnsureCommandListLocked() {
   s.command_list = banjo::renut_gpu::record::Wrap(detail::SlotList(s, s.frame));
   s.command_list->begin();
   s.list_open = true;
+  if (banjo::renut_gpu::checks::KickPathTraceOn())
+    s.frame_recording_start = std::chrono::steady_clock::now();
   s.list_draws = 0;  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit)
   ++s.list_generation;
   detail::BeginListTiming(s);
@@ -1108,10 +1168,21 @@ std::string Video::LatencyTrimReport() {
   return detail::LatencyTrimReport();  // atomics: no lock (the game thread's report)
 }
 
-void Video::KickLocked() {
+std::optional<bool> Video::PreviousFrameGpuDoneLocked() {
+#if defined(PLUME_DEKO3D)
+  const auto &s = State();
+  const uint32_t prev = (s.frame + kFramesInFlight - 1) % kFramesInFlight;
+  if (IsDeko3D() && s.submitted[prev])
+    return plume::Deko3DFenceCopyDone(detail::g_trim.frame_end[prev]);
+#endif
+  return std::nullopt;
+}
+
+bool Video::KickLocked() {
   auto &s = State();
   if (!s.list_open || !IsDeko3D())
-    return;
+    return false;
+  bool submitted = false;
   const uint32_t cur = s.frame;
 #if defined(PLUME_DEKO3D)
   // banjo-nx (2026-10-20): the frame before done? Seen at every kick (package 36i noted it only where a list went out
@@ -1153,6 +1224,7 @@ void Video::KickLocked() {
     detail::NoteGpuDoneSeenLocked((cur + kFramesInFlight - 1) % kFramesInFlight, false);
 #endif
     s.pending_list = nullptr;
+    submitted = true;
     banjo::renut_gpu::CountKickSubmit(0);
   }
   // The open list ends here when it holds enough draws; the frame goes on in a kick list of the slot.
@@ -1160,12 +1232,12 @@ void Video::KickLocked() {
   if (!banjo::renut_gpu::KickSubmitOn() ||
       s.list_draws < (eager ? detail::kEagerKickDraws : detail::kKickSubmitDraws) ||
       s.kick_lists_used[cur] >= (eager ? VideoState::kKickLists : detail::kKickListsAFrame))
-    return;
+    return submitted;
   std::unique_ptr<plume::RenderCommandList> &next = s.kick_lists[cur][s.kick_lists_used[cur]];
   if (!next) {
     next = s.queue->createCommandList();
     if (!next)
-      return;
+      return submitted;
   }
   detail::EndListTiming(s, false);
   banjo::renut_gpu::record::Drain();
@@ -1207,9 +1279,11 @@ void Video::KickLocked() {
     }
     detail::FirstGpuWorkLocked(cur);
     s.pending_list = nullptr;
+    submitted = true;
     banjo::renut_gpu::CountKickSubmit(0);
   }
 #endif
+  return submitted;
 }
 
 plume::RenderCommandList *Video::CommandListLocked() {
