@@ -1,87 +1,74 @@
 # Witcher2NX
 
-This branch contains the experimental [deko3d renderer](deko3d/README.md)
-used in the 0.1.14 test build. The original Vulkan build is documented below.
+Experimental Nintendo Switch homebrew port of **The Witcher 2: Assassins of Kings** for Atmosphère. ReXGlue statically recompiles the Xbox 360 PowerPC executable. The current Switch build translates the game's Direct3D calls through Renut and Plume to deko3d.
 
-Experimental Nintendo Switch homebrew port of **The Witcher 2: Assassins of Kings**.
-It statically recompiles the Xbox 360 executable with ReXGlue and renders through
-the Xenos Vulkan backend and Mesa NVK on Horizon.
+Build from your own Xbox 360 game dump. This repository contains the port source and build tools.
 
-The 0.1.9 test build reached the tutorial in a modified Ryujinx test setup and
-produced audio. Geometry and color corruption remained visible, and menu text
-was missing in that run. Physical Switch gameplay and performance for 0.1.9
-still need validation.
+## Status and performance
 
-The repository contains the port source, SDK changes and build tooling. Use your
-own game dump for the local build and SD card installation.
+The 0.1.32 build reached the tutorial in a modified Ryujinx build. Movement and camera controls were verified. The hardware figures below come from the preceding 0.1.31 build.
 
-## Build the NRO
+| Hardware benchmark | Configuration or result |
+| --- | --- |
+| Console | Nintendo Switch OLED with an 8 GB RAM mod |
+| Mode | Handheld, 1280 × 720 |
+| Scene | Tutorial dock |
+| CPU clock | 1963 MHz (1963.5 MHz in the profile) |
+| GPU clock | 1152 MHz |
+| RAM clock | 2333 MHz |
+| Game frame rate | **43.2–45.1 FPS** across eight consecutive 10-second gameplay samples |
 
-Requirements:
+These results are specific to the scene and the overclocked test unit. Performance at stock clocks, on a standard 4 GB Switch and across later chapters is unverified.
 
-- Python 3.11+, Git, CMake 3.25+ and a build tool such as Make.
-- The host CLI from [ReXGlue 0.10.0](https://github.com/rexglue/rexglue-sdk/releases/tag/v0.10.0).
-  On macOS, install the Xcode command-line tools for the codegen memory shim.
-- [devkitPro](https://devkitpro.org/wiki/Getting_Started) with devkitA64, libnx,
-  Switch tools and the Switch Expat, zlib and zstd portlibs.
-- A Switch NVK SDK prefix containing `lib/libvulkan.a`. See [Mesa setup](mesa/README.md).
+## Known issues
 
-Extract disc 1 of the Xbox 360 release so that `default.xex` and the game data
-are in the same directory. Code generation currently supports the tested PL/RU
-executable with Title ID `4E4D0855`, Media ID `414AAB82` and version `0.0.0.4`.
+- Audio can stutter or crackle in the first startup video. The cause is still under investigation.
+- Infrequent crashes have been observed during gameplay.
+- Disc 2 is unsupported. The current runtime reports success from [`XamSwapDisc`](sdk/src/kernel/xam/xam_info.cpp#L322) without switching the mounted data. Progress can stop when the game needs the second disc.
+- The deko3d renderer returns a fallback sample count for occlusion queries after their fence completes. Some visibility effects may differ from the original.
+- A full playthrough and sustained 60 FPS have yet to be verified.
+
+## Build
+
+Use an extracted copy of disc 1 from the PL/RU Xbox 360 release. Place `default.xex` and the game data in the same directory. The supported executable has Title ID `4E4D0855`, Media ID `414AAB82` and version `0.0.0.4`. The generator verifies its SHA-256.
 
 | File | SHA-256 |
 | --- | --- |
 | `default.xex` | `bea7c7d831ce285785fd47e2f7f0835db29316b216459d8d249ed0255f3c8ad0` |
 
-From the repository root:
+- Python 3.11+, Git, CMake 3.25+ and Make or Ninja.
+- The host CLI from [ReXGlue 0.10.0](https://github.com/rexglue/rexglue-sdk/releases/tag/v0.10.0). On macOS, install the Xcode Command Line Tools for the codegen memory shim.
+- devkitA64, libnx, deko3d, Switch tools and the Switch Expat, zlib and zstd portlibs. [devkitPro setup](https://devkitpro.org/wiki/Getting_Started)
+- A pinned SA2-NX checkout and host shader tools. The current Plume configuration also takes a Switch NVK SDK path. [deko3d build guide](deko3d/README.md), [NVK SDK setup](mesa/README.md)
 
-```sh
-python3 tools/fetch_thirdparty.py
-python3 tools/generate.py --rexglue /path/to/rexglue --game-root /path/to/disc1
+Follow the [deko3d build guide](deko3d/README.md) to generate the guest code and shaders from the same dump. The build produces `out/deko3d/witcher2_deko.nro` and the shader generation step produces the two `.bin` files below.
 
-export DEVKITPRO=/opt/devkitpro
-export DEVKITA64="$DEVKITPRO/devkitA64"
-NVK_SDK=/path/to/mesa-horizon-sdk/opt/devkitpro/portlibs/switch
+## Install and run
 
-cmake -S app -B out/switch \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE="$PWD/tools/switch/cmake/switch-devkitA64.cmake" \
-  -DREXGLUE_SWITCH_NVK_SDK="$NVK_SDK" \
-  -DWITCHER2_RENDERER=ON \
-  -DREXGLUE_BUILD_TESTS=OFF
-cmake --build out/switch --parallel
-```
-
-The result is `out/switch/witcher2.nro`. Use the `--parallel` job limit if the
-compiler runs low on memory. The generation step also reconstructs missing
-vtable methods and applies the [game-specific fixes](patches/README.md).
-
-## Install
-
-Copy `witcher2.nro` and the extracted disc 1 files to the Atmosphère SD card:
+Copy the generated files and the extracted disc 1 data to the Atmosphère SD card.
 
 ```text
 sd:/switch/witcher2/
-├── witcher2.nro
+├── witcher2.nro          ← out/deko3d/witcher2_deko.nro
+├── deko3d_glsl.bin       ← app/generated/deko3d/deko3d_glsl.bin
+├── deko3d_shaders.bin    ← app/generated/deko3d/deko3d_shaders.bin
 └── game_root/
     ├── default.xex
     ├── Data/
-    └── ... (other disc 1 files)
+    └── ... (other extracted game files)
 ```
 
-Launch hbmenu using title takeover (hold **R** while opening an installed game),
-then select **The Witcher 2 - Hardware Test**. The graphics log is written to
-`sd:/switch/witcher2/logs/graphics.log`.
+Hold **R** while opening an installed Switch title to launch hbmenu in application mode, then select **The Witcher 2 deko3d**. The optional configuration file is `sd:/switch/witcher2/witcher2.toml`. Logs are under `sd:/switch/witcher2/logs/`, including `graphics.log` and, when available, `rex/rex_profile.log` and `rex/rex_crash.log`.
 
-## Project layout
+## Source layout
 
 | Directory | Contents |
 | --- | --- |
-| [app](app/) | Game-specific bootstrap, renderer setup and function metadata |
-| [sdk](sdk/) | ReXGlue SDK fork with the Horizon runtime and port fixes |
-| [mesa](mesa/) | Switch Vulkan dependency setup |
-| [patches](patches/) | Generated-code fixes and SDK provenance |
+| [deko3d](deko3d/) | Current Switch app, Renut renderer and shader tools |
+| [app](app/) | Guest bootstrap, function metadata and earlier Vulkan build target |
+| [sdk](sdk/) | ReXGlue SDK fork with Horizon support |
+| [mesa](mesa/) | Switch NVK dependency setup |
+| [patches](patches/) | Codegen fixes and SDK provenance |
 | [tools](tools/) | Code generation, dependency setup and the Switch toolchain file |
 
-See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream credits and licenses.
+See the [third-party notices](THIRD_PARTY_NOTICES.md) for upstream credits and licenses.
