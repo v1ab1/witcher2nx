@@ -59,12 +59,9 @@ constexpr int kOutputThreadPriority = 0x2B;
 constexpr size_t kOutputThreadStack = 0x10000;
 // Bounded so the thread notices shutdown even if the device stops releasing.
 constexpr u64 kWaitTimeoutNs = 100'000'000;
-// audio_switch_pump: one frame (256 samples) every 5.333 ms with absolute deadlines. With this many
-// frames queued or fewer, another one is requested on each tick, and below the minimum one more is
-// requested to catch up (the system clock and the audio clock do not match exactly).
+// audio_switch_pump: one frame (256 samples) every 5.333 ms with absolute deadlines.
 constexpr u64 kPumpIntervalNs = 1'000'000'000ull * SwitchAudioDriver::kChannelSamples / 48000;
 constexpr size_t kTargetQueuedFrames = 6;
-constexpr size_t kMinQueuedFrames = 2;
 
 }  // namespace
 
@@ -139,9 +136,13 @@ size_t SwitchAudioDriver::QueuedFrames() {
   return frames_queued_.size();
 }
 
-void SwitchAudioDriver::RequestFrame() {
-  // The semaphore has a maximum: if the game does not serve the requests, the excess ones are lost.
-  semaphore_->Release(1, nullptr);
+void SwitchAudioDriver::RequestFrames(size_t count) {
+  // Preserve the requests that fit when some of the previous ones are still pending.
+  for (size_t i = 0; i < count; ++i) {
+    if (!semaphore_->Release(1, nullptr)) {
+      break;
+    }
+  }
 }
 
 /* --- system ------------------------------------------------------------------ */
@@ -348,16 +349,17 @@ void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
   }
 }
 
-void SwitchAudioSystem::PumpTick() {
+void SwitchAudioSystem::PumpTick(size_t elapsed_ticks) {
   std::lock_guard<std::mutex> guard(drivers_mutex_);
   for (SwitchAudioDriver* driver : drivers_) {
     const size_t queued = driver->QueuedFrames();
-    if (queued <= output_->frames_in_queue) {
-      driver->RequestFrame();
+    if (queued > output_->frames_in_queue) {
+      continue;
     }
-    if (queued < kMinQueuedFrames) {
-      driver->RequestFrame();  // the queue has emptied: one more to catch up
-    }
+    // One device buffer consumes four frames at once. Refill sooner when
+    // there is less than a full buffer ready for the next device release.
+    const size_t refill = elapsed_ticks + (queued < kFramesPerBuffer ? 1 : 0);
+    driver->RequestFrames(std::min(refill, output_->frames_in_queue + 1 - queued));
   }
 }
 
@@ -373,11 +375,11 @@ void SwitchAudioSystem::OutputThreadMain() {
     if (output.pump) {
       const u64 now = armGetSystemTick();
       if (now >= deadline) {
-        PumpTick();
-        deadline += interval;
-        if (now >= deadline) {
-          deadline = now + interval;  // more than one tick late: no catch-up burst
-        }
+        const u64 elapsed_ticks = (now - deadline) / interval + 1;
+        deadline += elapsed_ticks * interval;
+        // Recover short scheduling delays. A long pause only needs enough
+        // requests to rebuild the queue, not audio for the entire pause.
+        PumpTick(std::min<u64>(elapsed_ticks, kFramesPerBuffer));
         continue;
       }
       timeout_ns = armTicksToNs(deadline - now);  // at most until the next deadline

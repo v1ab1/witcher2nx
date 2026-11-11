@@ -120,20 +120,12 @@ void AudioSystem::WorkerThreadMain() {
   // Main run loop.
   uint32_t diag_pump_count = 0;
   while (worker_running_) {
-    // These handles signify the number of submitted samples. Once we reach
-    // 64 samples, we wait until our audio backend releases a semaphore
-    // (signaling a sample has finished playing)
-    auto result = rex::thread::WaitAny(wait_handles_, rex::countof(wait_handles_), true,
-                                       std::chrono::milliseconds(500));
+    // Backends release a client semaphore when they need another frame.
+    // The event in this set also wakes the worker for pause and shutdown.
+    auto result = rex::thread::WaitAny(wait_handles_, rex::countof(wait_handles_), true);
     if (result.first == rex::thread::WaitResult::kFailed) {
       REXAPU_WARN("AudioWorker: WaitAny failed");
       continue;
-    }
-
-    if (result.first == rex::thread::WaitResult::kTimeout) {
-      if (diag_pump_count < 5) {
-        REXAPU_NOISY_DEBUG("AudioWorker: WaitAny timed out (no semaphore signals)");
-      }
     }
 
     if (result.first == thread::WaitResult::kSuccess && result.second == kMaximumClientCount) {
@@ -146,8 +138,6 @@ void AudioSystem::WorkerThreadMain() {
       continue;
     }
 
-    // Number of clients pumped
-    bool pumped = false;
     if (result.first == rex::thread::WaitResult::kSuccess) {
       auto index = result.second;
 
@@ -175,17 +165,6 @@ void AudioSystem::WorkerThreadMain() {
       } else {
         REXAPU_DEBUG("AudioWorker: semaphore signaled for client {} but callback is 0", index);
       }
-
-      pumped = true;
-    }
-
-    if (!worker_running_) {
-      break;
-    }
-
-    if (!pumped) {
-      SCOPE_profile_cpu_i("apu", "Sleep");
-      rex::thread::Sleep(std::chrono::milliseconds(500));
     }
   }
   worker_running_ = false;
