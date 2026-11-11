@@ -18,6 +18,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xenumerator.h>
+#include <rex/system/xevent.h>
+#include <rex/system/xex_module.h>
 #include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
 
@@ -319,11 +321,33 @@ u32 XamLoaderGetDvdTrayState_entry(mapped_u32 out_state) {
   return X_STATUS_SUCCESS;
 }
 
-u32 XamSwapDisc_entry(u32 disc_number) {
-  // Stub for multi-disc games. Single-disc games (like Blue Dragon's reblue test)
-  // don't need this, but the game may look it up dynamically via XexGetProcedureAddress.
-  REXKRNL_DEBUG("XamSwapDisc({}) - stub, returning success", (uint32_t)disc_number);
-  return X_STATUS_SUCCESS;
+u32 XamSwapDisc_entry(u32 disc_number, ppc_ptr_t<X_KEVENT> completion_event) {
+  if (!completion_event) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  auto event = XObject::GetNativeObject(REX_KERNEL_STATE(), completion_event.host_address());
+  if (!event || event->type() != XObject::Type::Event) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  // The guest passes an event referenced with ObReferenceObjectByHandle.
+  event->ReleaseHandle();
+
+  const auto module = REX_KERNEL_STATE()->GetExecutableModule();
+  const auto* xex = module ? module->xex_module() : nullptr;
+  const auto* info = xex ? xex->opt_execution_info() : nullptr;
+  if (!info || disc_number < 1 || disc_number > info->disc_count) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  if (disc_number != info->disc_number) {
+    // The runtime cannot mount another disc yet. Leave the guest prompt active.
+    REXKRNL_WARN("XamSwapDisc: disc {} requested, disc {} mounted", disc_number,
+                 static_cast<unsigned>(info->disc_number));
+    return X_ERROR_SUCCESS;
+  }
+
+  static_cast<XEvent*>(event.get())->Set(1, false);
+  REXKRNL_INFO("XamSwapDisc: disc {} already mounted, signaled completion", disc_number);
+  return X_ERROR_SUCCESS;
 }
 
 }  // namespace xam

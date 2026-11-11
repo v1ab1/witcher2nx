@@ -40,10 +40,10 @@ class SwitchAudioDriver final : public AudioDriver {
   // touching nothing, if no frame is queued.
   bool MixFrameInto(float* stereo_out, const StereoFold& fold, float gain, bool release);
 
-  // Output thread, with audio_switch_pump: frames delivered by the game, not yet mixed, and one more
-  // frame request (a semaphore release).
+  // Output thread, with audio_switch_pump: frames delivered by the game, not yet mixed, and requests
+  // for more frames.
   size_t QueuedFrames();
-  void RequestFrame();
+  void RequestFrames(size_t count);
 
  private:
   rex::thread::Semaphore* semaphore_;
@@ -76,7 +76,7 @@ class SwitchAudioSystem final : public AudioSystem {
   void StopOutput();
   void OutputThreadMain();
   void FillAndAppend(size_t buffer_index);
-  void PumpTick();
+  void PumpTick(size_t elapsed_ticks);
 
   std::unique_ptr<Output> output_;
   // Guards drivers_. Held while mixing, so DestroyDriver never races a mix.
