@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
@@ -26,6 +27,9 @@
 // Passive counters: the audio thread neither writes reports nor pauses the game.
 extern "C" void RexSwitchPerfAdd(unsigned id, u64 value);
 extern "C" void RexSwitchPerfMax(unsigned id, u64 value);
+
+REXCVAR_DECLARE(int32_t, audio_dump_s);
+REXCVAR_DECLARE(int32_t, audio_dump_from_s);
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
 REXCVAR_DEFINE_BOOL(audio_switch_pump, true, "Audio",
@@ -40,6 +44,9 @@ REXCVAR_DEFINE_INT32(audio_switch_frames_in_queue, 10, "Audio",
                      "when the audio is opened");
 
 namespace rex::audio::nx {
+
+// Shares the asynchronous WAV writer with the guest PCM capture.
+void WriteAudioOutputDump(std::vector<int16_t> samples);
 
 namespace {
 
@@ -158,6 +165,9 @@ struct SwitchAudioSystem::Output {
   std::array<AudioOutBuffer, kBufferCount> buffers{};
   std::array<s16*, kBufferCount> samples{};
   std::array<float, kBufferSamples * 2> mix{};
+  std::vector<int16_t> dump_samples;
+  size_t dump_frames_to_skip = 0;
+  size_t dump_samples_left = 0;
 };
 
 std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
@@ -204,6 +214,12 @@ bool SwitchAudioSystem::StartOutput() {
   auto output = std::make_unique<Output>();
   output->pump = REXCVAR_GET(audio_switch_pump);
   output->frames_in_queue = static_cast<size_t>(std::clamp(REXCVAR_GET(audio_switch_frames_in_queue), 2, 32));
+  const int dump_seconds = std::clamp(REXCVAR_GET(audio_dump_s), 0, 120);
+  if (dump_seconds > 0) {
+    output->dump_frames_to_skip = size_t(std::max(REXCVAR_GET(audio_dump_from_s), 0)) * 48000;
+    output->dump_samples_left = size_t(dump_seconds) * 48000 * 2;
+    output->dump_samples.reserve(output->dump_samples_left);
+  }
   REXLOG_INFO("SwitchAudioSystem: 187.5 Hz pump {}, {} frames queued", output->pump ? "active" : "off",
               output->frames_in_queue);
 
@@ -343,6 +359,17 @@ void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
   if (R_SUCCEEDED(rc)) {
     RexSwitchPerfAdd(26, pcm_nonzero ? 1 : 0);
     RexSwitchPerfAdd(27, 1);
+    if (output.dump_samples_left > 0) {
+      const size_t skipped = std::min(output.dump_frames_to_skip, size_t(kBufferSamples));
+      output.dump_frames_to_skip -= skipped;
+      const size_t copied = std::min((kBufferSamples - skipped) * 2, output.dump_samples_left);
+      const auto* begin = samples + skipped * 2;
+      output.dump_samples.insert(output.dump_samples.end(), begin, begin + copied);
+      output.dump_samples_left -= copied;
+      if (output.dump_samples_left == 0) {
+        WriteAudioOutputDump(std::move(output.dump_samples));
+      }
+    }
   }
   if (R_FAILED(rc)) {
     REXLOG_ERROR("SwitchAudioSystem: audoutAppendAudioOutBuffer failed: 0x{:08X}", rc);

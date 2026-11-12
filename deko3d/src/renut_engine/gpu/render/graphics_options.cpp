@@ -15,7 +15,7 @@
 
 REXCVAR_DEFINE_STRING(renut_shadow_resolution, "Resolution", "Nuts&Bolts/Graphics",
                       "Shadow map resolution, as a multiple of the console's: Resolution follows "
-                      "renut_resolution; 1x is the console's; 2x, 3x and 4x are sharper.")
+                      "the render resolution; 1x is the console's; 2x, 3x and 4x are sharper.")
     .allowed({"Resolution", "1x", "2x", "3x", "4x"});
 
 REXCVAR_DEFINE_STRING(renut_ambient_occlusion, "Half", "Nuts&Bolts/Graphics",

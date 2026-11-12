@@ -47,8 +47,6 @@ void RenutLockstepFrame(uint64_t, const rex::ui::RawImage*) {}
 }
 
 namespace sa2::render {
-bool Docked() { return appletGetOperationMode() == AppletOperationMode_Console; }
-int32_t RenderHeightOf(bool) { return 720; }
 void OnPresented(uint64_t) {}
 }
 

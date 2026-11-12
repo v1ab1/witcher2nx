@@ -26,6 +26,7 @@
 #include "renut_engine/gpu/banjo_renut_deko3d.h"     // sa2-nx (1.0.3.1): PackageScales
 #endif
 
+#if !defined(WITCHER2_LIVE_D3D)
 // sa2-nx (2026-10-20, 1.0.3.1, the user's request: 1920x1080 docked, as the native renderer drew it up to 1.0.2.1):
 // the render resolution follows the console's mode (sa2::render::Docked: libnx's operation mode, Reverse-NX obeyed; the
 // PC's simulated one, F9) at the next frame, at the heights the native renderer's keys set. On deko3d the swapchain
@@ -40,6 +41,7 @@ REXCVAR_DEFINE_STRING(renut_resolution, "720p", "Nuts&Bolts/Graphics",
                       "Internal render resolution, by its height: 480p, 720p (the game's own), "
                       "1080p, 1440p or 4K (2160 lines). Applies from the next frame.")
     .allowed({"480p", "720p", "1080p", "1440p", "4K"});
+#endif
 // sa2-nx (2026-10-20, the user's request: MSAA for the final build, 2x): SA2 makes every render target single-sample,
 // so Renut's multisampling (N&B's targets are multisampled: banjo-nx's resolves, depth resolves and readbacks of them)
 // never ran. The game's single-sample targets get this many samples on the host, as the native renderer's sa2_msaa did;
@@ -275,6 +277,9 @@ RenderScale ResolutionScale() {
 
 void LatchResolutionScaleLocked() {
   LatchGraphicsOptionsLocked();
+#if defined(WITCHER2_LIVE_D3D)
+  const RenderScale scale{};
+#else
   const std::string resolution = REXCVAR_GET(renut_resolution);
   // Codes of RenderScale.
   RenderScale scale{resolution == "480p"    ? 1u
@@ -325,6 +330,7 @@ void LatchResolutionScaleLocked() {
                 docked ? "1920x1080" : "1280x720");
     }
   }
+#endif
 #endif
   if (!g_resolution_latched || scale != g_resolution_scale) {
     RGPU_INFO("Render resolution {}x{} ({:.3g}x)", scale.Size(GuestScreenWidth()), scale.Size(720),

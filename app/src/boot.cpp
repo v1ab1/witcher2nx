@@ -118,6 +118,14 @@ void ReadScriptOperand32(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// sub_823B1868 registers this script native dynamically. The Xbox 360
+// implementation advances the bytecode cursor by one byte and returns.
+void GiveBackItemsToOrgOwner(PPCContext& ctx, uint8_t* base) {
+  ctx.r11.u64 = REX_LOAD_U32(ctx.r4.u32 + 0x18);
+  ctx.r11.u64 += 1;
+  REX_STORE_U32(ctx.r4.u32 + 0x18, ctx.r11.u32);
+}
+
 // Movie decoder callback at 0x833C0D68. Fill the block pointers, then
 // dispatch through the game's transform table with the original registers.
 void PrepareMovieBlock(PPCContext& ctx, uint8_t* base) {
@@ -162,7 +170,7 @@ int Fail(const char* message, unsigned status) {
   return EXIT_FAILURE;
 }
 #else
-bool IsExplicitLoadingScreen(uint32_t worker, uint8_t* base) {
+bool HasLoadingScreenWork(uint32_t worker, uint8_t* base) {
   return REX_LOAD_U32(worker + 624) || REX_LOAD_U32(worker + 628);
 }
 #endif
@@ -179,13 +187,13 @@ bool Witcher2ShouldDrainLoadingQueue(PPCContext& ctx, uint8_t* base) {
   const uint32_t pending = REX_LOAD_U32(worker + 20);
   static thread_local bool just_updated = false;
   static thread_local std::chrono::steady_clock::time_point next_update;
-  const bool loading_screen_active = IsExplicitLoadingScreen(worker, base);
-  if (!loading_screen_active || pending < kLoadingQueueBacklog) {
+  const bool loading_screen_work = HasLoadingScreenWork(worker, base);
+  if (!loading_screen_work || pending < kLoadingQueueBacklog) {
     just_updated = false;
     next_update = {};
     // When ordinary work is ready outside loading, render the queued scene
     // instead of generating an extra frame from an empty draw list.
-    return !loading_screen_active;
+    return !loading_screen_work;
   }
   const auto now = std::chrono::steady_clock::now();
   // Start the drain window on re-entry, after the previous update has returned.
@@ -207,16 +215,36 @@ bool Witcher2ShouldDeferIdleLoadingFrame(PPCContext& ctx, uint8_t* base) {
 #if defined(WITCHER2_RENDERER)
   // The Xbox render worker starts presenting a blurred frame with a spinner
   // after a 50 ms gap. Give normal gameplay frames more time before falling
-  // back to it. Keep startup and explicit loading screens on the guest timer.
+  // back to it. The object at +628 can still be updating after the loading
+  // screen at +624 has closed. Its lifetime must not bypass this delay.
   constexpr double kIdleLoadingDelaySeconds = 3.0;
   return ctx.f0.f64 > 0.0 && ctx.f13.f64 < kIdleLoadingDelaySeconds &&
-         !ctx.r30.u8 && !IsExplicitLoadingScreen(ctx.r26.u32, base);
+         !ctx.r30.u8 && REX_LOAD_U32(ctx.r26.u32 + 624) == 0;
 #else
   return false;
 #endif
 }
 
 #if REX_PLATFORM_SWITCH
+REX_EXTERN(sub_828DAA58) {
+  constexpr uint32_t kDspBlockSamplesOffset = 1232;
+  constexpr uint32_t kDspRingSamplesOffset = 1236;
+  constexpr uint32_t kSamplesPerBlock = 256;
+  constexpr uint32_t kDefaultBlocks = 4;
+  constexpr uint32_t kSwitchBlocks = 8;
+
+  const uint32_t system = ctx.r3.u32;
+  __imp__sub_828DAA58(ctx, base);
+  // FMOD mixes into an output ring allocated later during system initialization.
+  // A burst of four XAudio callbacks can lap its default four-block ring before
+  // the mixer polls again, replaying the previous PCM. Keep more blocks ready.
+  if (REX_LOAD_U32(system + kDspBlockSamplesOffset) == kSamplesPerBlock &&
+      REX_LOAD_U32(system + kDspRingSamplesOffset) == kSamplesPerBlock * kDefaultBlocks) {
+    REX_STORE_U32(system + kDspRingSamplesOffset, kSamplesPerBlock * kSwitchBlocks);
+    REXLOG_INFO("[audio] FMOD DSP ring: {} blocks of {} samples", kSwitchBlocks, kSamplesPerBlock);
+  }
+}
+
 void Witcher2YieldJobWait() {
   static const bool enabled = [] {
     const bool yield = REXCVAR_GET(witcher2_job_wait_yield);
@@ -260,6 +288,7 @@ bool RegisterGuestFunctions(rex::Runtime& runtime) {
   // tail-branches to the already recompiled implementation.
   return dispatcher->SetFunction(0x828BEEF0, sub_828A24E8) &&
          dispatcher->SetFunction(0x82F68530, ReadScriptOperand32) &&
+         dispatcher->SetFunction(0x82F2D728, GiveBackItemsToOrgOwner) &&
          dispatcher->SetFunction(0x833C0D68, PrepareMovieBlock);
 }
 

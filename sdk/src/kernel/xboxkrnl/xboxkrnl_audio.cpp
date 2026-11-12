@@ -31,8 +31,10 @@
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -44,8 +46,9 @@ REXCVAR_DEFINE_INT32(audio_volumemask_sleep_us, 0, "Audio",
 
 REXCVAR_DEFINE_INT32(audio_dump_s, 0, "Audio",
                      "Diagnostic: seconds of the audio the game delivers (6 channels, before the "
-                     "driver) that are saved to audio_dump_<client>.wav next to the executable; "
-                     "0 = none");
+                     "driver) saved to audio_dump_<client>.wav next to the executable. On Switch, "
+                     "also saves up to 120 seconds of stereo PCM sent to audout as "
+                     "audio_dump_audout.wav; 0 = none");
 REXCVAR_DEFINE_INT32(audio_dump_from_s, 0, "Audio",
                      "Diagnostic: seconds of audio of each client skipped before the dump");
 
@@ -113,33 +116,40 @@ class DumpedWriter {
   std::thread thread_;  // last: starts with the other members already constructed
 };
 
-void WriteDump(uint32_t client, std::vector<float> samples) {
-  DumpedWriter::Enqueue([client, samples = std::move(samples)]() {
-    const auto path = rex::filesystem::GetExecutableFolder() /
-                      ("audio_dump_" + std::to_string(client) + ".wav");
+template <typename Sample>
+void WriteDump(std::string filename, uint16_t channels, std::vector<Sample> samples) {
+  DumpedWriter::Enqueue([filename = std::move(filename), channels, samples = std::move(samples)]() {
+    const auto path = rex::filesystem::GetExecutableFolder() / filename;
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
       REXKRNL_WARN("[audio] could not create the dump {}", path.string());
       return;
     }
-    const uint32_t bytes = uint32_t(samples.size() * sizeof(float));
+    constexpr uint16_t kSampleBytes = sizeof(Sample);
+    const uint32_t bytes = uint32_t(samples.size() * kSampleBytes);
+    const uint16_t frame_bytes = channels * kSampleBytes;
     const auto u32 = [&](uint32_t v) { file.write(reinterpret_cast<const char*>(&v), 4); };
     const auto u16 = [&](uint16_t v) { file.write(reinterpret_cast<const char*>(&v), 2); };
     file.write("RIFF", 4);
     u32(36 + bytes);
     file.write("WAVEfmt ", 8);
     u32(16);
-    u16(3);  // IEEE float
-    u16(6);
+    u16(std::is_same_v<Sample, float> ? 3 : 1);  // IEEE float or integer PCM
+    u16(channels);
     u32(48000);
-    u32(48000 * 6 * 4);
-    u16(6 * 4);
-    u16(32);
+    u32(48000 * frame_bytes);
+    u16(frame_bytes);
+    u16(kSampleBytes * 8);
     file.write("data", 4);
     u32(bytes);
     file.write(reinterpret_cast<const char*>(samples.data()), bytes);
-    REXKRNL_INFO("[audio] dump of client {}: {} samples per channel in {}", client,
-                 samples.size() / 6, path.string());
+    file.close();
+    if (!file) {
+      REXKRNL_WARN("[audio] could not finish the dump {}", path.string());
+      return;
+    }
+    REXKRNL_INFO("[audio] dump: {} samples per channel in {}", samples.size() / channels,
+                 path.string());
   });
 }
 
@@ -174,12 +184,22 @@ void DumpFrame(uint32_t client, const uint8_t* frame) {
   }
   if (c.samples.size() >= goal) {
     c.written = true;
-    WriteDump(client, std::move(c.samples));
+    WriteDump("audio_dump_" + std::to_string(client) + ".wav", 6, std::move(c.samples));
     c.samples = std::vector<float>();
   }
 }
 
 }  // namespace
+
+#if REX_PLATFORM_SWITCH
+namespace rex::audio::nx {
+
+void WriteAudioOutputDump(std::vector<int16_t> samples) {
+  WriteDump("audio_dump_audout.wav", 2, std::move(samples));
+}
+
+}  // namespace rex::audio::nx
+#endif
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;

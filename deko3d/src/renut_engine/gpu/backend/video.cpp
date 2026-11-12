@@ -1056,6 +1056,9 @@ bool Video::CreateHostDevice() {
   static const bool double_buffer = REXCVAR_GET(sa2_renut_double_buffer);
   const uint32_t images = double_buffer ? 2u : kFramesInFlight + 1;
   plume::RenderSwapChainDesc swap_desc(render_window, kSwapChainFormat, images, false, kFramesInFlight);
+#if defined(WITCHER2_LIVE_D3D) && defined(PLUME_DEKO3D)
+  plume::Deko3DSetSwapChainSize(1280, 720);
+#endif
   RGPU_INFO("Swapchain: {} images{}", images, double_buffer ? " (sa2_renut_double_buffer)" : "");
   s.swap_chain = s.queue->createSwapChain(swap_desc);
   // plume's Vulkan swapchain is created lazily by resize().

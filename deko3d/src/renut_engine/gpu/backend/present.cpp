@@ -33,6 +33,9 @@
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx: banjo_renut_capture_raw's format check
 #endif
+#if defined(WITCHER2_LIVE_D3D) && REX_PLATFORM_SWITCH
+extern "C" void RexSwitchPerfResolution(unsigned width, unsigned height);
+#endif
 
 // banjo-nx (2026-10-17, deko3d renderer tests): the captures copy the game's frame texture as it is (4-byte formats only,
 // its channels as BGRA), without the scan-out pass: which of the two a wrong capture comes from.
@@ -582,6 +585,21 @@ void Video::Present(const PresentImage *image) {
   std::lock_guard lock(s.mutex);
   if (!s.host_ready || s.shutting_down.load(std::memory_order_acquire))
     return;
+#if defined(WITCHER2_LIVE_D3D) && REX_PLATFORM_SWITCH
+  if (image && image->texture && image->descriptor != kInvalidDescriptor) {
+    // Report the visible region of the game's front buffer, before scan-out scales it.
+    const uint32_t width = image->source_width ? image->source_width : image->width;
+    const uint32_t height = image->source_height ? image->source_height : image->height;
+    static uint32_t reported_width = 0;
+    static uint32_t reported_height = 0;
+    if (width && height && (width != reported_width || height != reported_height)) {
+      RexSwitchPerfResolution(width, height);
+      RGPU_INFO("Game frame source {}x{}", width, height);
+      reported_width = width;
+      reported_height = height;
+    }
+  }
+#endif
   FinishWaterCaptureFrameLocked(s, image);
   PresentLocked(s, image);
   s.last_guest_present_ms.store(NowMs(), std::memory_order_release);

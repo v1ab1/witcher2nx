@@ -21,8 +21,6 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
-#include <rex/ui/keybinds.h>
-#include <rex/ui/ui_event.h>
 #include <rex/ui/virtual_key.h>
 
 #include <switch.h>
@@ -648,69 +646,11 @@ void SwitchInputDriver::Poll(size_t index) {
 
 /* From the profiler (switch_perf.cpp): turns the GPU A/B test lap on and off. */
 extern "C" void RexSwitchPerfToggleAb(void);
-/*
- * The SDK menus, on the controller
- *
- * On the PC they are function keys (see RegisterBind in rex_app.cpp): F3 debug,
- * F4 settings, F7 achievements and the tilde key for the log console. The Switch
- * has no keyboard, so they go to combinations with L+R, which no game uses
- * together with the D-pad:
- *
- *   L + R + Up    -> debug overlay (counters, statistics)
- *   L + R + Right -> settings
- *   L + R + Down  -> log console
- *   L + R + Left  -> achievements
- *   L + R + ZL    -> GPU A/B test lap (for measuring, not for playing)
- *   L + R + right stick -> moves the debug overlay if it is open
- *                          (its position is saved; see Poll and debug_overlay.cpp)
- *
- * It fires once per press, not while held: each shortcut stores its bit in
- * slot.menu_shortcuts with the state from the previous poll.
- */
 void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
-  struct Shortcut {
-    uint64_t button;
-    rex::ui::VirtualKey keystroke;
-  };
   constexpr uint64_t kModifier = HidNpadButton_L | HidNpadButton_R;
-  static const Shortcut kShortcuts[] = {
-      {HidNpadButton_Up, rex::ui::VirtualKey::kF3},
-      {HidNpadButton_Right, rex::ui::VirtualKey::kF4},
-      {HidNpadButton_Down, rex::ui::VirtualKey::kOem3},
-      {HidNpadButton_Left, rex::ui::VirtualKey::kF7},
-  };
-
   const bool modifier = (held & kModifier) == kModifier;
-  for (size_t i = 0; i < std::size(kShortcuts); ++i) {
-    const uint64_t bit = uint64_t(1) << i;
-    const bool now = modifier && (held & kShortcuts[i].button) != 0;
-    const bool before = (slot.menu_shortcuts & bit) != 0;
-    if (now && !before) {
-      /*
-       * Each shortcut creates or destroys an ImGui menu, and the UI thread
-       * draws them continuously while any is open. From this game thread a
-       * menu could be deleted in the middle of its Draw, so it is done on the
-       * UI thread.
-       */
-      const rex::ui::VirtualKey vk = kShortcuts[i].keystroke;
-      auto press = [vk] {
-        rex::ui::KeyEvent keystroke(nullptr, vk, 1, false, false, false, false, false);
-        rex::ui::ProcessKeyEvent(keystroke);
-      };
-      rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
-      if (!window || !window->app_context().CallInUIThread(press)) {
-        press();
-      }
-      REXLOG_INFO("menu shortcut: {}", rex::ui::VirtualKeyToString(vk));
-    }
-    slot.menu_shortcuts = now ? (slot.menu_shortcuts | bit) : (slot.menu_shortcuts & ~bit);
-  }
 
-  /*
-   * L+R+ZL starts the A/B test lap (switch_perf.cpp). It sends no key to the
-   * game: it talks directly to the profiler. It is kept apart from the loop
-   * above because that one translates buttons into keys and this is not a key.
-   */
+  // L+R+ZL starts the GPU A/B test lap (switch_perf.cpp).
   const uint64_t kBitAb = uint64_t(1) << 8;
   const bool ab_now = modifier && (held & HidNpadButton_ZL) != 0;
   const bool ab_before = (slot.menu_shortcuts & kBitAb) != 0;
