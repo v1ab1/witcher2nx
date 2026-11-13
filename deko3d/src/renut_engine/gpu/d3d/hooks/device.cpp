@@ -78,6 +78,9 @@ REX_IMPORT(__imp__VdGetCurrentDisplayGamma, VdGetCurrentDisplayGamma, void(u32, 
 
 namespace {
 
+// The deko3d D3D bridge does not produce Xbox sample reports.
+constexpr u32 kOcclusionFallbackSamples = 1;
+
 // Scratch space packets go to: the inline writers in N&B's own code (D3D's
 // header helpers), which reserve against m_pRingGuarantee. Large enough for
 // the biggest single reservation; the guarantee margin is what inline writers
@@ -1436,17 +1439,31 @@ BANJO_RENUT_HOOK_RAW(sub_82D102E0) {
     return;
   }
 
-  // This backend does not write the Xbox sample reports. A nonzero count
-  // lets the title continue without rejecting objects as fully occluded.
-  WriteU32(result, 0, 1);
+  WriteU32(result, 0, kOcclusionFallbackSamples);
   if (size >= 16) {
     WriteU32(result, 4, 0);
     WriteU32(result, 8, 0);
-    WriteU32(result, 12, 1);
+    WriteU32(result, 12, kOcclusionFallbackSamples);
   }
   query[20] |= kQueryComplete;
   ctx.r3.u64 = 0;
 }
+
+BANJO_RENUT_HOOK_RAW(sub_82EB68A0) {
+  // The object visibility pass treats totals of 20 samples or fewer as
+  // occluded. Leave the reports for the paired lighting queries alone.
+  constexpr u32 kObjectVisibilityReturn = 0x82EC1CD4;
+  constexpr u32 kVisibleSamples = 21;
+  const bool object_visibility = ctx.lr == kObjectVisibilityReturn;
+  const u32 result_va = ctx.r4.u32;
+  __imp__sub_82EB68A0(ctx, base);
+  if (object_visibility && ctx.r3.u32 == 0) {
+    auto* result = GuestPtr<be_u32>(result_va);
+    if (result && *result == kOcclusionFallbackSamples)
+      *result = kVisibleSamples;
+  }
+}
+
 #if !defined(WITCHER2_LIVE_D3D)
 BANJO_RENUT_HOOK(sub_8254EEE8, D3DDevice_InsertCallback_hook);  // D3DDevice_InsertCallback [0x821FB688]
 BANJO_RENUT_HOOK(sub_825589D8, Sa2SynchronizeToPresentationInterval_hook);  // D3D_SynchronizeToPresentationInterval [0x8228A748]
